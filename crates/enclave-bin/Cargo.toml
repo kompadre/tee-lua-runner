@@ -1,0 +1,10 @@
+[package]
+name = "enclave-bin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tee-enclave"
+path = "src/main.rs"
+
+[dependencies]

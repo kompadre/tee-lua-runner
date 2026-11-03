@@ -1,0 +1,5 @@
+# Pinned for reproducible enclave builds (Stage 7: stable PCRs require a
+# pinned toolchain). Do not bump casually.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

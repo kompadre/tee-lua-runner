@@ -1,0 +1,15 @@
+[package]
+name = "runner-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tee-runner"
+path = "src/main.rs"
+
+[dependencies]
+runner-core = { path = "../runner-core" }
+tee-attest = { path = "../tee-attest" }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tpass"
+path = "src/main.rs"
+
+[dependencies]
