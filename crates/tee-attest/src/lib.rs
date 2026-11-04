@@ -1,8 +1,25 @@
-//! Attestation backends for the TEE runner.
+//! Attestation backends and document verification.
 //!
-//! The runner only depends on the [`Attestor`] trait; concrete backends
-//! (mock for local/QEMU runs, real `/dev/nsm` for AWS Nitro) are wired in
-//! at Stage 2.
+//! * [`Attestor`] — the trait the runner depends on (`nonce` + `user_data` →
+//!   document bytes). `user_data` is where the runner binds the guest module
+//!   measurement.
+//! * [`NullAttestor`] — refuses; the safe default when no backend is wired.
+//! * [`MockAttestor`] — Stage 2/6 stand-in producing COSE_Sign1 documents
+//!   signed by an Ed25519 test root, structurally mirroring Nitro attestation
+//!   payloads (module_id, digest, pcrs, timestamp, nonce, user_data).
+//! * [`verify`] — client-side verification against a pluggable [`TrustRoot`]
+//!   with explicit [`Expectations`] (freshness nonce, measurement binding).
+//!
+//! Stage 7 swaps the mock backend for the real `/dev/nsm` NSM and the trust
+//! root for the AWS Nitro certificate chain; the document shape and the
+//! verification entry point stay the same.
+
+mod cose;
+mod mock;
+mod verify;
+
+pub use mock::MockAttestor;
+pub use verify::{AttestationPayload, Expectations, TrustRoot, VerifyError};
 
 /// Errors produced by an attestation backend.
 #[derive(Debug, thiserror::Error)]
@@ -16,7 +33,7 @@ pub enum AttestError {
 }
 
 /// Produces attestation documents that bind `user_data` (for the runner:
-/// the script measurement, see `runner_core::measure`).
+/// the module measurement, see `runner_core::measure`).
 ///
 /// `nonce` is caller-supplied and included in the document so relying parties
 /// can prove freshness.

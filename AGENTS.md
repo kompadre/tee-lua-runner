@@ -16,19 +16,34 @@ Read `README.md` for architecture; `docs` are linked there.
 
 ## Task flow (which doc when)
 
+Tasks move through a pipeline with **eviction at both transitions**:
+
+```
+TODO.md ──(task STARTS: evict breakdown + its open questions)──▶ SESSION.md
+SESSION.md ──(task COMPLETES: evict detail)──▶ CHANGELOG.md [Unreleased]
+                                        (SESSION keeps a compact outcome/handoff line;
+                                         TODO stage row gets ticked)
+```
+
 | Doc | Role | When to update |
 |-----|------|----------------|
 | `AGENTS.md` | Stable policy/conventions (this file) | Rarely; only when conventions actually change |
-| `TODO.md` | Task board: stages, open questions, backlog | When picking up/finishing/adding tasks |
-| `SESSION.md` | Rolling handoff log: last session's outcome, current state, gotchas | At the end of every working session |
-| `CHANGELOG.md` | User-visible history (`Keep a Changelog`, `[Unreleased]`) | Whenever behavior/APIs/structure change |
+| `TODO.md` | **Queue**: stage table + breakdowns/open-questions of *not yet started* tasks + backlog. Evicted on start | When a task starts (evict → SESSION) or completes (tick stage row) |
+| `SESSION.md` | **Workbench + handoff log**: the current task's detail (evicted from TODO), its open questions, stage context, decisions, gotchas, compact outcomes of finished sessions | On task start (adopt detail); on completion (evict detail → CHANGELOG, leave outcome line) |
+| `CHANGELOG.md` | **Completed** user-visible history (`Keep a Changelog`, `[Unreleased]`) | When a task completes: receive the evicted detail as entries |
 | `README.md` | Human-facing overview | When architecture or workflows change |
 
-**Loop:** read this file → take the next task from `TODO.md` → implement →
-1. tick/annotate the task in `TODO.md` (promote open questions if discovered),
-2. append a dated entry to `SESSION.md` (what changed, what to watch, next step),
-3. add a `CHANGELOG.md` entry under `[Unreleased]` if user-visible,
+**Loop:** read this file → take the next task from `TODO.md` →
+1. **evict** that task's breakdown (and its open questions) from `TODO.md`
+   into the current `SESSION.md` entry,
+2. implement — decisions and gotchas accumulate in that SESSION entry,
+3. on completion: **evict** the task detail from `SESSION.md` into
+   `CHANGELOG.md` `[Unreleased]`, tick the stage row in `TODO.md`, leave a
+   compact outcome + next-step line in `SESSION.md`,
 4. run the gates (below) — all green — then commit.
+
+Finished sessions stay as chronology (handoff context, gotchas); their
+feature-level detail belongs to CHANGELOG only.
 
 Commit message style: `Area: concise summary` or `Stage N: …` with a body
 explaining *why*, referencing issue-worthy facts (measured numbers, discoveries).

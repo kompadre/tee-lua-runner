@@ -1,7 +1,12 @@
 # TODO.md — task board
 
 Legend: `[x]` done · `[~]` in progress · `[ ]` pending. Stage detail lives in
-`README.md`; conventions in `AGENTS.md`; recent outcomes in `SESSION.md`.
+`README.md`; conventions in `AGENTS.md`.
+
+This file is the **queue**: only tasks not yet started get their breakdown
+here. When a task starts, its breakdown and open questions are **evicted into
+the current `SESSION.md` entry**; when it completes, detail moves from SESSION
+into `CHANGELOG.md` and the stage row below gets ticked.
 
 ## Stages
 
@@ -10,7 +15,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` pending. Stage detail lives in
 | 0 | Workspace, CI, toolchain pin | [x] done |
 | 1 | Runner core (Lua embedding) | [x] superseded by 1b |
 | 1b | Wasmtime engine pivot: validation, capability imports, measurement, budgets, guest SDK, host CLI | [x] done |
-| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [ ] **next** |
+| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [~] in progress → SESSION.md |
 | 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [ ] |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [ ] |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [ ] |
@@ -18,26 +23,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` pending. Stage detail lives in
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
 
-## Stage 2 — task breakdown
+<!-- Stage 2 breakdown evicted to SESSION.md on start (2026-11-04). -->
 
-- [ ] `tee-attest`: CBOR COSE_Sign1 codec (ciborium; protected header
-      `{"alg":"EdDSA"}`, Sig_structure per RFC 9814)
-- [ ] `tee-attest`: payload schema mirroring Nitro attestation docs
-      (`module_id`, `digest`, `pcrs`, `timestamp`, `nonce`, `user_data`,
-      `algorithm`, optional `public_key`)
-- [ ] `tee-attest`: `MockAttestor` (Ed25519 test root, per-call timestamp)
-      implementing the existing `Attestor` trait
-- [ ] `tee-attest`: `verify()` — signature check (`verify_strict`), algorithm
-      allowlist, nonce/user_data expectations, typed `VerifyError`
-- [ ] `runner-cli`: `--mock-attest` flag (prints `mock-attest-root: <hex>` to
-      stderr; PCR0 = sha256 of the runner binary)
-- [ ] `tee-guest`: `svc-attest` example service (`{"method":"doc",
-      "nonce_hex":…}` → `{"doc_hex":…}`) + build script entry
-- [ ] `runner-cli`: `verify` subcommand (reference client: root hex, optional
-      nonce/user-data expectations, prints payload JSON)
-- [ ] Tests: sign/verify roundtrip, tamper, wrong root, nonce mismatch,
-      user_data binding; CLI e2e (guest → host → doc → verify)
-- [ ] Docs: README status row, SESSION/CHANGELOG updates, commit
 
 ## Open design questions (resolve before/during the named stage)
 

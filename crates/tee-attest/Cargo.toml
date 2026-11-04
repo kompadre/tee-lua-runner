@@ -5,3 +5,8 @@ edition.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
