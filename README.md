@@ -32,8 +32,8 @@ Stage table mirrors [`TODO.md`](TODO.md), which is authoritative.
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | done |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | done |
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | done |
-| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | planned — **next** |
-| 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | planned |
+| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | done |
+| 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | planned — **next** |
 
 ## Layout
 
@@ -47,7 +47,8 @@ crates/
   tee-proto      gate-service wire contract (requests/responses, PoP
                  messages), framing codec, TCP/vsock transports
   tee-attest     Attestor trait + backends (null, mock, remote NSM
-                 stand-in; real /dev/nsm at Stage 7)
+                 stand-in, real /dev/nsm ioctl); document verification
+                 for mock (Ed25519) and real Nitro (AWS chain, ES384)
   tee-crypto     identities (Ed25519+X25519, PoP), RFC 9180 HPKE
                  (base + auth modes, RFC-vector-pinned), blind-gatekeeper
                  envelopes E_TEE(E_local(…)), client↔enclave channel
@@ -61,6 +62,9 @@ scripts/
 deploy/
   qemu/          enclave-like guest environment: guest init, rootfs build,
                  QEMU run, full e2e — `just qemu-demo`
+  nitro/         real Nitro EIF pipeline: enclave Dockerfile, build script
+                 + measurements manifest (`just eif`), EC2 runbook
+                 (`nitro/RUNBOOK.md`)
 ```
 
 ## Module model
@@ -99,6 +103,7 @@ extern "C" { #[link_name = "get"] fn state_get_raw(ptr: i32, len: i32) -> i64; }
 - [`TODO.md`](TODO.md) — task board: stages, open design questions, backlog
 - [`SESSION.md`](SESSION.md) — workbench for the current task + handoff log (gotchas, next step)
 - [`CHANGELOG.md`](CHANGELOG.md) — user-visible history
+- [`deploy/nitro/RUNBOOK.md`](deploy/nitro/RUNBOOK.md) — EC2 Nitro Enclaves runbook (Stage 7)
 
 ## Development
 
@@ -106,9 +111,12 @@ Quick recipes via [`just`](https://just.systems) (`just --list` shows them
 all): `just gates` runs the five quality gates, `just examples` builds every
 guest artifact, `just ci` does both, `just measure <module>` prints manifest
 + measurement, `just run`/`just serve` wrap the runner with pass-through
-flags, and `just qemu-build` / `just qemu-run` / `just qemu-demo` drive the
+flags, `just qemu-build` / `just qemu-run` / `just qemu-demo` drive the
 QEMU enclave environment (Stage 6; `qemu-demo` needs `/dev/kvm` +
-`/dev/vhost-vsock` — it is a local validation, not a CI gate). Raw commands
+`/dev/vhost-vsock` — it is a local validation, not a CI gate), and
+`just eif TEE_KEY=<hex32>` builds the real Nitro enclave image + manifest
+(Stage 7; needs docker + `cargo install aws-nitro-enclaves-cli`, no root —
+see `deploy/nitro/RUNBOOK.md` for the full EC2 procedure). Raw commands
 below.
 
 ```sh

@@ -6,3 +6,5 @@
 /scripts/examples/*.wasm
 # QEMU environment build outputs (rootfs, initramfs, run logs)
 /deploy/qemu/build/
+# EIF pipeline build outputs (staging, .eif, manifests, nitro logs)
+/deploy/nitro/build*/

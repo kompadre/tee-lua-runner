@@ -12,3 +12,10 @@ ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 tee-proto = { path = "../tee-proto" }
+# Stage 7 — real Nitro document verification (pure Rust, no ring):
+x509-parser = { workspace = true }
+p384 = { workspace = true }
+sha2 = { workspace = true }
+# Stage 7 — AttestationDoc CBOR schema (also the enclave-side /dev/nsm ABI):
+aws-nitro-enclaves-nsm-api = { workspace = true }
+serde_bytes = { workspace = true }

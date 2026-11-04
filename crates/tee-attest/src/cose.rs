@@ -20,6 +20,40 @@ use crate::verify::VerifyError;
 /// Signature algorithm used by the mock attestation documents.
 pub(crate) const ALG_EDDSA: &str = "EdDSA";
 
+/// COSE alg label for ES384 as produced by the real NSM (`-35`).
+pub(crate) const ALG_ES384: &str = "-35";
+
+/// Reads the protected-header `alg` value as a comparable string:
+/// text algorithms come through verbatim (`"EdDSA"`), numeric COSE
+/// identifiers are rendered as their signed decimal (`"-35"`). Missing
+/// or malformed headers map to the missing-label string so dispatch
+/// rejects them uniformly.
+pub(crate) fn alg(protected: &[u8]) -> Result<String, VerifyError> {
+    let header: ciborium::Value = ciborium::from_reader(protected)
+        .map_err(|err| VerifyError::Decode(format!("protected header: {err}")))?;
+    let ciborium::Value::Map(entries) = header else {
+        return Err(VerifyError::Decode(
+            "protected header is not a CBOR map".into(),
+        ));
+    };
+    for (key, value) in &entries {
+        let is_alg = match key {
+            ciborium::Value::Text(label) => label == "alg",
+            ciborium::Value::Integer(label) => i128::from(*label) == 1,
+            _ => false,
+        };
+        if !is_alg {
+            continue;
+        }
+        return Ok(match value {
+            ciborium::Value::Text(label) => label.clone(),
+            ciborium::Value::Integer(id) => i128::from(*id).to_string(),
+            other => format!("{other:?}"),
+        });
+    }
+    Ok("<missing>".to_string())
+}
+
 fn to_cbor<T: Serialize>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::new();
     // Serializing into a Vec<u8> can only fail on allocation failure.
@@ -29,7 +63,7 @@ fn to_cbor<T: Serialize>(value: &T) -> Vec<u8> {
 
 /// COSE Sig_structure for Sign1:
 /// `["Signature1", protected, external_aad, payload]`.
-fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
+pub(crate) fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
     to_cbor(&Value::Array(vec![
         Value::Text("Signature1".to_string()),
         Value::Bytes(protected.to_vec()),

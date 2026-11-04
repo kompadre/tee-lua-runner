@@ -57,6 +57,14 @@ qemu-run:
 qemu-demo:
     bash deploy/qemu/e2e.sh
 
+# --- EIF pipeline (Stage 7) ---
+
+# Build the enclave image file + measurements manifest.
+# TEE_KEY=<hex32> required (head -c32 /dev/urandom | xxd -p -c64).
+eif TEE_KEY:
+    @if [ -z "{{TEE_KEY}}" ]; then echo "usage: just eif TEE_KEY=<hex32>"; exit 1; fi
+    TEE_KEY={{TEE_KEY}} bash deploy/nitro/build-eif.sh
+
 # Handle one JSON request on stdin against a module.
 run module *args:
     cargo run -q -p runner-cli -- run {{module}} {{args}}

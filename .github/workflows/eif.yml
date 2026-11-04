@@ -1,0 +1,49 @@
+# EIF pipeline artifact (Stage 7): container → nitro-cli build-enclave →
+# .eif + measurements manifest uploaded as a CI artifact.
+# Commands mirror `deploy/nitro/build-eif.sh` via the `just eif` recipe —
+# keep in sync. Not part of `gates`: runs on manual dispatch, version tags,
+# and pushes to main that touch the pipeline inputs.
+name: EIF
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - "deploy/nitro/**"
+      - "scripts/**"
+      - "crates/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - ".github/workflows/eif.yml"
+
+jobs:
+  eif:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install wasm + musl targets
+        run: rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl
+      - name: install musl-tools + nitro-cli
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          cargo install aws-nitro-enclaves-cli --locked
+      # Deterministic PCRs per commit: layer timestamps come from the last
+      # commit date (build-eif.sh passes SOURCE_DATE_EPOCH to docker build).
+      - name: build EIF
+        env:
+          # Demo key keeps CI artifacts reproducible (stable PCRs) —
+          # production builds MUST override TEE_KEY locally (see RUNBOOK).
+          TEE_KEY: ${{ secrets.TEE_KEY || '2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a' }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          bash deploy/nitro/build-eif.sh
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eif-${{ github.sha }}
+          path: |
+            deploy/nitro/build/tee-runner.eif
+            deploy/nitro/build/tee-runner.manifest.json
+          if-no-files-found: error

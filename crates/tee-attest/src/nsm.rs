@@ -1,16 +1,16 @@
 //! NSM-shaped attestation backend: the **same operation API** the real
-//! Nitro NSM provides (`GetAttestationDoc`), split so Stage 7 only swaps
-//! transport + document format:
+//! Nitro NSM provides (`GetAttestationDoc`), with two interchangeable
+//! backends behind [`crate::Attestor`]:
 //!
-//! * Stage 6 (here): `NsmRemoteAttestor` dials a stand-in daemon over
+//! * [`NsmDeviceAttestor`] (Stage 7): local `/dev/nsm` ioctl inside a real
+//!   Nitro enclave, via `aws-nitro-enclaves-nsm-api`. Produces genuine
+//!   Nitro documents (verified through the AWS certificate chain).
+//! * [`NsmRemoteAttestor`] (Stage 6): dials a stand-in daemon over
 //!   TCP/vsock; documents are Stage 2 COSE_Sign1 (mock-signed).
-//! * Stage 7: the same request fields go over the `/dev/nsm` ioctl ABI
-//!   (`aws-nitro-enclaves-nsm-api`); the response carries the Nitro
-//!   document and verification gains the AWS certificate-chain root.
 //!
 //! The `public_key` field mirrors the real NSM request: the enclave passes
-//! its channel key, which the stand-in binds into the signed document —
-//! exactly the flow the client already verifies.
+//! its channel key, which the NSM binds into the signed document — exactly
+//! the flow the client already verifies.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -105,5 +105,77 @@ impl crate::Attestor for NsmRemoteAttestor {
             return Err(fail("empty document".into()));
         };
         hex::decode(document).map_err(|err| fail(format!("document not hex: {err}")))
+    }
+}
+
+/// Attestor backed by the local `/dev/nsm` device (real Nitro enclave).
+///
+/// Wraps `aws-nitro-enclaves-nsm-api`'s ioctl driver: `nsm_init()` opens
+/// the device once, each `attest` issues `GetAttestationDoc` with the
+/// request fields, and the response is the genuine Nitro document (CBOR
+/// attestation payload under ES384 + AWS certificate chain — verified by
+/// [`crate::verify`]'s dispatch, not here).
+///
+/// Outside an enclave `/dev/nsm` does not exist and construction fails
+/// with the device error, so accidental host use is loud, not silent.
+pub struct NsmDeviceAttestor {
+    fd: i32,
+    public_key: Option<String>,
+}
+
+// The fd is a plain device descriptor; sharing it across threads is fine
+// (requests are serialized by the ioctl itself).
+unsafe impl Send for NsmDeviceAttestor {}
+unsafe impl Sync for NsmDeviceAttestor {}
+
+impl NsmDeviceAttestor {
+    /// `public_key_hex`: the enclave channel key to bind into every
+    /// document (the NSM's `public_key` request field), as hex.
+    pub fn new(public_key_hex: Option<String>) -> Result<Self, String> {
+        let fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
+        if fd < 0 {
+            return Err("cannot open /dev/nsm (not running inside a Nitro enclave? \
+                 use `--nsm HOST:PORT` for the stand-in backend)"
+                .to_string());
+        }
+        Ok(Self {
+            fd,
+            public_key: public_key_hex,
+        })
+    }
+}
+
+impl Drop for NsmDeviceAttestor {
+    fn drop(&mut self) {
+        aws_nitro_enclaves_nsm_api::driver::nsm_exit(self.fd);
+    }
+}
+
+impl crate::Attestor for NsmDeviceAttestor {
+    fn attest(&self, nonce: &[u8], user_data: &[u8]) -> Result<Vec<u8>, AttestError> {
+        use aws_nitro_enclaves_nsm_api::api::{Request, Response};
+        use serde_bytes::ByteBuf;
+
+        let fail = |msg: String| AttestError::Backend(format!("nsm[/dev/nsm]: {msg}"));
+
+        // The real NSM takes the public key as raw bytes; we keep hex
+        // strings at this layer (same as the remote backend), so decode.
+        let public_key = match &self.public_key {
+            Some(hex_str) => {
+                Some(hex::decode(hex_str).map_err(|err| fail(format!("public_key hex: {err}")))?)
+            }
+            None => None,
+        };
+
+        let request = Request::Attestation {
+            user_data: Some(ByteBuf::from(user_data.to_vec())),
+            nonce: Some(ByteBuf::from(nonce.to_vec())),
+            public_key: public_key.map(ByteBuf::from),
+        };
+        match aws_nitro_enclaves_nsm_api::driver::nsm_process_request(self.fd, request) {
+            Response::Attestation { document } => Ok(document),
+            Response::Error(code) => Err(fail(format!("NSM error: {code:?}"))),
+            other => Err(fail(format!("unexpected response: {other:?}"))),
+        }
     }
 }

@@ -16,12 +16,22 @@
 
 mod cose;
 mod mock;
+mod nitro;
 mod nsm;
 mod verify;
 
 pub use mock::MockAttestor;
-pub use nsm::{NsmRemoteAttestor, NsmRequest, NsmResponse};
-pub use verify::{verify, AttestationPayload, Expectations, TrustRoot, VerifyError};
+pub use nsm::{NsmDeviceAttestor, NsmRemoteAttestor, NsmRequest, NsmResponse};
+pub use verify::{verify, verify_at, AttestationPayload, Expectations, TrustRoot, VerifyError};
+
+/// Returns the protected-header algorithm of a COSE_Sign1 document as a
+/// comparable string: `"EdDSA"` (mock/QEMU documents) or `"-35"` (real
+/// Nitro documents, ES384). Lets callers inspect documents without
+/// verifying them.
+pub fn document_alg(document: &[u8]) -> Result<String, VerifyError> {
+    let (protected, _, _) = cose::parse(document)?;
+    cose::alg(&protected)
+}
 
 /// Errors produced by an attestation backend.
 #[derive(Debug, thiserror::Error)]

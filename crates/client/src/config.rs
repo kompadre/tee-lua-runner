@@ -31,10 +31,17 @@ pub struct Config {
     /// trust-on-first-use pinned by `tpass attest --save`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement_hex: Option<String>,
-    /// Pinned TEE envelope key (hex, X25519 public). Carried in config until
-    /// the attestation payload can carry both enclave keys (Stage 6).
+    /// Pinned TEE envelope key (hex, X25519 public). Preferred source is
+    /// the attested `user_data` suffix (`attest --save` adopts it); the
+    /// config pin cross-checks it (Stage 7 both-keys).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tee_pk_hex: Option<String>,
+    /// Pinned enclave-image PCR0 (hex, SHA-384; from the measurements
+    /// manifest). Optional but strongly recommended for real Nitro: the
+    /// hardware-measured anchor that stops a tampered *runner binary* from
+    /// lying about its self-reported module measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcr0_hex: Option<String>,
     /// Whether the server runs in channel mode (discovered from the verified
     /// document's `public_key` field, saved by `attest --save`).
     #[serde(default)]
@@ -121,10 +128,16 @@ mod tests {
             root_hex: Some("ab".repeat(32)),
             measurement_hex: None,
             tee_pk_hex: Some("cd".repeat(32)),
+            pcr0_hex: Some("ef".repeat(48)),
             channel: true,
         };
         config.save(&store).unwrap();
         assert_eq!(Config::load(&store).unwrap(), config);
+
+        // New field round-trips; legacy configs without it default to None.
+        let legacy = br#"{"server":"h:1"}"#;
+        std::fs::write(Config::path(&store), legacy).unwrap();
+        assert_eq!(Config::load(&store).unwrap().pcr0_hex, None);
 
         let _ = std::fs::remove_dir_all(&store);
     }

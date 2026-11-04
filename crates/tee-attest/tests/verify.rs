@@ -51,6 +51,99 @@ fn verification_without_expectations_succeeds() {
     assert!(tee_attest::verify(&root, &document, &Expectations::default()).is_ok());
 }
 
+/// Stage 7 both-keys layout: `user_data = measurement ‖ tee_pk`. The
+/// measurement expectation matches the prefix (with the optional 32-byte
+/// suffix), never arbitrary extension, and `tee_pk()` extracts the key.
+#[test]
+fn composed_user_data_prefix_matches_and_tee_pk_extracts() {
+    let (mock, root) = fixture();
+    let measurement = [3u8; 32];
+    let tee_pk = [8u8; 32];
+    let mut composed = measurement.to_vec();
+    composed.extend_from_slice(&tee_pk);
+
+    let document = mock.attest(b"n1", &composed).unwrap();
+    let payload = tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_user_data(&measurement),
+    )
+    .expect("composed layout must satisfy the measurement expectation");
+    assert_eq!(payload.tee_pk(), Some(tee_pk));
+
+    // The legacy bare-measurement layout still verifies; no key to extract.
+    let document = mock.attest(b"n2", &measurement).unwrap();
+    let payload = tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_user_data(&measurement),
+    )
+    .expect("legacy layout must still verify");
+    assert_eq!(payload.tee_pk(), None);
+
+    // Wrong measurement is rejected under both layouts.
+    for user_data in [&composed[..], &measurement[..]] {
+        let document = mock.attest(b"n3", user_data).unwrap();
+        let err = tee_attest::verify(
+            &root,
+            &document,
+            &Expectations::new().with_user_data(&[4u8; 32]),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VerifyError::UserDataMismatch), "{err:?}");
+    }
+}
+
+/// The suffix is bounded: a two-key-plus-junk layout fails the expectation
+/// (prefix must be followed by *nothing* or exactly one 32-byte key).
+#[test]
+fn overlong_user_data_rejected() {
+    let (mock, root) = fixture();
+    let measurement = [3u8; 32];
+    let mut extended = measurement.to_vec();
+    extended.extend_from_slice(&[8u8; 32 + 16]); // 48-byte suffix: not a key
+
+    let document = mock.attest(b"n", &extended).unwrap();
+    let err = tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_user_data(&measurement),
+    )
+    .unwrap_err();
+    assert!(matches!(err, VerifyError::UserDataMismatch), "{err:?}");
+}
+
+/// PCR0 expectation (measurements manifest pin): matches the pinned value,
+/// rejects a different one and a missing PCR0.
+#[test]
+fn pcr0_expectation_enforced() {
+    let (mock, root) = fixture(); // pcrs: {"0": "ab"*32}
+    let document = mock.attest(b"n", &[1u8; 32]).unwrap();
+
+    tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_pcr0(&"ab".repeat(32)),
+    )
+    .expect("matching PCR0 passes");
+
+    let err = tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_pcr0(&"cd".repeat(32)),
+    )
+    .unwrap_err();
+    assert!(matches!(err, VerifyError::PcrMismatch(_)), "{err:?}");
+
+    // Case-insensitive pin (manifest may uppercase).
+    tee_attest::verify(
+        &root,
+        &document,
+        &Expectations::new().with_pcr0(&"AB".repeat(32)),
+    )
+    .expect("uppercase pin normalizes");
+}
+
 #[test]
 fn every_tampered_byte_fails_verification() {
     let (mock, root) = fixture();

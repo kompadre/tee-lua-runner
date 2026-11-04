@@ -36,6 +36,13 @@ enum Commands {
         /// Path to the wasm service module.
         module: PathBuf,
     },
+    /// Print the X25519 public half of an envelope-unwrap key (the value
+    /// that ends up attested inside `user_data` and pinned by tpass).
+    TeePk {
+        /// Envelope-unwrap secret (hex, 32 bytes).
+        #[arg(long)]
+        tee_key: String,
+    },
     /// Handle a single JSON request and print the JSON response.
     Run {
         /// Path to the wasm service module.
@@ -90,10 +97,11 @@ enum Commands {
         /// prints `channel-pk: <hex>` to stderr.
         #[arg(long)]
         channel: bool,
-        /// Fetch attestation documents from an NSM stand-in at this address
-        /// (`HOST:PORT` or `vsock:CID:PORT`) instead of signing in-process.
-        /// The stand-in prints the trust root. Mutually exclusive with
-        /// `--mock-attest`.
+        /// Fetch attestation documents from an NSM backend instead of
+        /// signing in-process. `/dev/nsm` = local device (real Nitro
+        /// enclave, Stage 7); `HOST:PORT` or `vsock:CID:PORT` = stand-in
+        /// daemon (Stage 6/QEMU, prints the trust root). Mutually exclusive
+        /// with `--mock-attest`.
         #[arg(long)]
         nsm: Option<String>,
         /// Provision the TEE envelope-unwrap key (X25519 secret, hex32) for
@@ -121,7 +129,8 @@ enum Commands {
     },
     /// Verify an attestation document against a trust root (reference client).
     Verify {
-        /// Trust root public key, hex-encoded (32 bytes for the mock root).
+        /// Trust root: `aws-nitro` (real Nitro PKI, pinned) or a hex-encoded
+        /// Ed25519 key (32 bytes) for mock/QEMU documents.
         #[arg(long)]
         root: String,
         /// Attestation document, hex-encoded.
@@ -133,6 +142,9 @@ enum Commands {
         /// Expected user_data (module measurement), hex-encoded.
         #[arg(long)]
         user_data: Option<String>,
+        /// Expected enclave-image PCR0, hex-encoded (measurements manifest).
+        #[arg(long)]
+        pcr0: Option<String>,
     },
 }
 
@@ -140,6 +152,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Measure { module } => cmd_measure(&module),
+        Commands::TeePk { tee_key } => cmd_tee_pk(&tee_key),
         Commands::Run {
             module,
             request,
@@ -193,7 +206,14 @@ fn main() -> ExitCode {
             doc,
             nonce,
             user_data,
-        } => cmd_verify(&root, &doc, nonce.as_deref(), user_data.as_deref()),
+            pcr0,
+        } => cmd_verify(
+            &root,
+            &doc,
+            nonce.as_deref(),
+            user_data.as_deref(),
+            pcr0.as_deref(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -294,6 +314,15 @@ fn cmd_measure(module: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cmd_tee_pk(tee_key: &str) -> Result<()> {
+    let bytes: [u8; 32] = hex::decode(tee_key.trim())
+        .context("tee-key is not valid hex")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("tee-key must be exactly 32 bytes"))?;
+    println!("{}", hex::encode(tee_crypto::x25519_public(&bytes)));
+    Ok(())
+}
+
 fn cmd_run(module: &Path, request: &Path, opts: ExecOpts) -> Result<()> {
     let bytes = read_module(module)?;
     let tee_key = provision_tee_key(opts.tee_key.as_deref())?;
@@ -363,6 +392,13 @@ fn cmd_serve(
     };
     let channel_pk = channel.as_ref().map(|(_, pk)| pk.as_str());
     let attestor = match &nsm {
+        // `/dev/nsm` (or any absolute path) → local device ioctl; anything
+        // else → stand-in address (TCP/vsock), as in Stage 6/QEMU.
+        Some(target) if target.starts_with('/') => {
+            let backend = tee_attest::NsmDeviceAttestor::new(channel_pk.map(String::from))
+                .map_err(|err| anyhow::anyhow!(err))?;
+            Some(Arc::new(backend) as Arc<dyn Attestor>)
+        }
         Some(addr) => {
             let backend = tee_attest::NsmRemoteAttestor::new(addr, channel_pk.map(String::from))
                 .map_err(|err| anyhow::anyhow!(err))?;
@@ -486,8 +522,14 @@ fn handle_nsm_conn(
     Ok(())
 }
 
-fn cmd_verify(root: &str, doc: &str, nonce: Option<&str>, user_data: Option<&str>) -> Result<()> {
-    let root = TrustRoot::from_hex(root)?;
+fn cmd_verify(
+    root: &str,
+    doc: &str,
+    nonce: Option<&str>,
+    user_data: Option<&str>,
+    pcr0: Option<&str>,
+) -> Result<()> {
+    let root = TrustRoot::parse(root)?;
     let document = hex::decode(doc.trim()).context("doc is not valid hex")?;
     let mut expectations = Expectations::new();
     if let Some(nonce) = nonce {
@@ -497,6 +539,9 @@ fn cmd_verify(root: &str, doc: &str, nonce: Option<&str>, user_data: Option<&str
     if let Some(user_data) = user_data {
         expectations = expectations
             .with_user_data(&hex::decode(user_data.trim()).context("user_data is not valid hex")?);
+    }
+    if let Some(pcr0) = pcr0 {
+        expectations = expectations.with_pcr0(pcr0);
     }
     let payload = tee_attest::verify(&root, &document, &expectations)?;
     println!("{}", serde_json::to_string_pretty(&payload)?);

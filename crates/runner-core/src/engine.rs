@@ -1026,14 +1026,23 @@ fn attest_envelope(ctx: &SharedCtx, arg: &Json) -> Json {
         Err(envelope) => return host_err(format!("tee.attest: {}", envelope["error"])),
     };
     // Clone the attestor out, then drop the lock before calling into it.
-    let (attestor, measurement) = {
+    // user_data composition (Stage 7, both-keys decision): the signed field
+    // carries `measurement ‖ tee_pk` so the envelope-unwrap key is attested
+    // alongside the module measurement; the channel key keeps the NSM's
+    // single `public_key` slot. Without a provisioned TEE key the field is
+    // the bare 32-byte measurement (legacy layout, still valid).
+    let (attestor, user_data) = {
         let guard = ctx.lock().expect("host ctx lock");
-        (guard.attestor.clone(), guard.measurement)
+        let mut user_data = guard.measurement.to_vec();
+        if let Some(tee_key) = guard.tee_key {
+            user_data.extend_from_slice(&tee_crypto::x25519_public(&tee_key));
+        }
+        (guard.attestor.clone(), user_data)
     };
     let Some(attestor) = attestor else {
         return host_err("tee.attest: no attestation backend configured");
     };
-    match attestor.attest(&nonce, &measurement) {
+    match attestor.attest(&nonce, &user_data) {
         Ok(doc) => host_ok(Json::String(to_hex(&doc))),
         Err(err) => host_err(format!("tee.attest: {err}")),
     }
@@ -1321,6 +1330,30 @@ mod tests {
         expected.extend_from_slice(b"nonce");
         expected.extend_from_slice(&[7u8; 32]);
         assert_eq!(env, json!({"ok": true, "value": to_hex(&expected)}));
+    }
+
+    /// Stage 7 both-keys: with a provisioned TEE key, `user_data` becomes
+    /// `measurement ‖ x25519_public(tee_key)` (64 bytes) so the envelope key
+    /// rides inside the signed document alongside the measurement.
+    #[test]
+    fn attest_composes_measurement_and_tee_pk() {
+        struct Capture;
+        impl Attestor for Capture {
+            fn attest(&self, _nonce: &[u8], user_data: &[u8]) -> Result<Vec<u8>, AttestError> {
+                Ok(user_data.to_vec())
+            }
+        }
+        let tee_key = [9u8; 32];
+        let ctx = test_ctx_full(Some(Arc::new(Capture)), Some(tee_key));
+        let env = attest_envelope(&ctx, &json!({"nonce_hex": "6e6f6e6365"}));
+        let composed = hex::decode(env["value"].as_str().unwrap()).unwrap();
+        assert_eq!(composed.len(), 64, "measurement ‖ tee_pk");
+        assert_eq!(&composed[..32], &[7u8; 32], "measurement prefix");
+        assert_eq!(
+            &composed[32..],
+            &tee_crypto::x25519_public(&tee_key),
+            "attested envelope key suffix"
+        );
     }
 
     #[test]

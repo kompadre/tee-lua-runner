@@ -7,6 +7,47 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **EIF pipeline (Stage 7)** — container → `nitro-cli build-enclave` →
+  measurements manifest → CI artifact → EC2 runbook, validated locally end
+  to end (EC2 execution is documented, not yet run):
+  - **Real attestation documents** (`tee-attest`): verifies genuine Nitro
+    documents — ES384 COSE_Sign1 over an X.509 chain rooted at the
+    **pinned AWS Nitro Enclaves Root G1** fingerprint (`64:1A:03:21:…`,
+    compiled in, `--root aws-nitro` on CLI/config), with certificate
+    validity windows checked at verification time (`verify_at` for
+    historical documents). Hand-rolled pure-Rust (`x509-parser` + `p384`,
+    no `ring`); fixture-tested against a real captured document (chain,
+    signature, expectations, expiry, tamper rejection). `TrustRoot` now
+    selects mock (Ed25519 hex) vs `aws-nitro`; dispatch is by the
+    document's algorithm.
+  - **Enclave-side NSM device backend**: `NsmDeviceAttestor` over
+    `/dev/nsm` (AWS `nsm-api` ioctl); `serve --nsm /dev/nsm` selects it
+    (path) vs the Stage 6 stand-in (address). Missing device fails loudly.
+  - **Both-keys resolution**: the NSM's single `public_key` slot keeps the
+    per-boot channel key; the envelope key is attested as
+    `user_data = measurement ‖ tee_pk`. The verifier matches the
+    measurement as a length-bounded prefix, `tpass attest --save` adopts
+    the attested envelope key when unconfigured, and every attested
+    session **cross-checks** it against the config pin (mismatch refuses).
+  - **PCR0 pinning**: `Expectations::with_pcr0` + `tpass attest --pcr0` +
+    config `pcr0_hex` + `tee-runner verify --pcr0` — the hardware anchor
+    over the self-reported module measurement; consumed from the
+    measurements manifest.
+  - **`deploy/nitro/`**: enclave `Dockerfile` (musl-static runner on
+    busybox-musl, config via image ENV — Nitro's init passes it to PID 1),
+    `build-eif.sh` (musl build → measure → docker → `nitro-cli
+    build-enclave` → manifest; rootless via `NITRO_CLI_BLOBS`/
+    `_LOGS_PATH`/`_ARTIFACTS`), `RUNBOOK.md` (full EC2 procedure incl.
+    JIT check and the Q1′ attested-time observation), and `just eif`.
+  - **Measurements manifest** (`tee-runner.manifest.json`): PCR0-2, module
+    measurement/capabilities, envelope key, provenance (git/toolchain/
+    nitro-cli/eif sha256). PCRs are rebuild-stable for a given `TEE_KEY`
+    (empirically verified); the key itself is measurement-bound (changing
+    `TEE_KEY` changes PCR0/PCR2). **Pin PCRs, not `eif_sha256`.**
+  - **CI artifact** (`.github/workflows/eif.yml`): builds the EIF + manifest
+    and uploads them on manual dispatch, `v*` tags, and pipeline-path
+    pushes to main (demo `TEE_KEY` unless the `TEE_KEY` secret is set).
+  - **`tee-runner tee-pk`**: derives the attested public half for manifests.
 - **QEMU local enclave environment (Stage 6)** — the enclave architecture
   without real Nitro, validated live end-to-end (`just qemu-demo`):
   - **Transports** (`tee-proto::transport`): `HOST:PORT` /

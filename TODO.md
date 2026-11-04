@@ -21,8 +21,8 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [x] done |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [x] done |
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [x] done |
-| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] **next** |
-| 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
+| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [x] done |
+| 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] **next** |
 
 <!-- Stage 3 breakdown + its open questions evicted to SESSION.md on start (2026-11-04). -->
 
@@ -32,26 +32,22 @@ into `CHANGELOG.md` and the stage row below gets ticked.
      on start (2026-11-04). -->
 <!-- Stage 6 breakdown + its questions (JIT, both-keys slot, attested time)
      evicted to SESSION.md on start (2026-11-04). -->
+<!-- Stage 7 breakdown (its own scope line had no sub-items) + carried
+     questions Q1' and both-keys slot evicted to SESSION.md on start
+     (2026-11-04). -->
 
 ## Open design questions (resolve before/during the named stage)
 
-1. **Q1′ — attested time for the rolling window (Stage 7).** v1 (Session 5)
-   uses host time with a monotonic floor (rollback fails closed), but a host
-   that jumps its clock *forward* expires throttle windows early. The NSM
-   ABI already carries a `timestamp`; trusting it needs the real hardware
-   NSM (Stage 7). *Thorniest correctness issue in the throttle design.*
-2. **Q2′ — durable blacklist state (Stage 8).** v1 state is host in-memory:
+<!-- 1. Q1′ (attested time) evicted on Stage 7 start; RESOLVED there: defer
+     adoption with kernel evidence (no RTC, KVM paravirt clock → parent-VM
+     jumps don't reach the enclave) + empirical EC2 check in RUNBOOK §4. -->
+1. **Q2′ — durable blacklist state (Stage 8).** v1 state is host in-memory:
    restarts reset throttle buckets *and blacklist*. Blacklist durability
    needs an AEAD-sealed snapshot (state integrity vs. the untrusted host).
-3. **Both enclave keys in one attestation (Stage 7).** Discovered in Stage 6:
-   the NSM ABI carries a single `public_key` slot (ours and Nitro's alike) —
-   two fields are impossible. Decide at Stage 7: bind the envelope key via
-   `user_data` composition, reuse one keypair with strict domain
-   separation, or a signed key list. tee-pk stays config-pinned until then.
-4. **JIT inside Nitro enclaves (Stage 6).** Expect Cranelift's RWX mappings
-   to work (enclaves are VMs, not SGX), but verify empirically; Wasmtime's
-   `pulley` interpreter is the fallback if not.
-5. **Repo name** still says "lua" (README notes the pivot). Rename when
+<!-- 3. both-keys slot evicted on Stage 7 start; RESOLVED there: user_data =
+     measurement ‖ tee_pk, channel key keeps the public_key slot.
+     4. JIT empirically PASS at Stage 6 (QEMU); real-Nitro check is RUNBOOK §2. -->
+2. **Repo name** still says "lua" (README notes the pivot). Rename when
    convenient — needs an explicit decision (AGENTS guardrail).
 
 ## Backlog (nice to have)

@@ -34,11 +34,15 @@ impl Ctx {
         let hex_key = config
             .tee_pk_hex
             .as_deref()
-            .context("tee-pk not configured (`tpass attest --tee-pk <hex> --save`)")?;
+            .context("tee-pk not configured (run `tpass attest --save` to adopt the attested key, or pass `init --tee-pk`)")?;
         tee_proto::decode_pk32(hex_key).context("configured tee-pk is not a 32-byte hex key")
     }
 
     /// Connects and completes the attestation bootstrap using config pins.
+    /// Cross-checks the attested envelope key against the configured pin
+    /// (Stage 7 both-keys): a mismatch means the server-side TEE is sealing
+    /// to a different key than this client pins — refuse rather than leak
+    /// entries into an unopenable envelope.
     fn attested_session(&self) -> Result<(Session, Config)> {
         let config = self.config()?;
         let server = config
@@ -56,7 +60,17 @@ impl Ctx {
             None => None,
         };
         let mut session = Session::connect(server)?;
-        session.attest(root, expected.as_deref())?;
+        let payload = session.attest(root, expected.as_deref(), config.pcr0_hex.as_deref())?;
+        if let (Some(attested), Some(pinned)) = (payload.tee_pk(), config.tee_pk_hex.as_deref()) {
+            if hex::encode(attested) != pinned.to_ascii_lowercase() {
+                bail!(
+                    "attested tee-pk {} does not match the configured pin {pinned} — \
+                     refusing (re-run `tpass attest --tee-pk <hex> --save` only after \
+                     verifying the enclave)",
+                    hex::encode(attested)
+                );
+            }
+        }
         Ok((session, config))
     }
 
@@ -109,6 +123,7 @@ pub fn init(
         root_hex: root,
         measurement_hex: measurement,
         tee_pk_hex: tee_pk,
+        pcr0_hex: None,
         channel: false,
     }
     .save(&ctx.store)?;
@@ -123,6 +138,7 @@ pub fn attest(
     root: Option<String>,
     measurement: Option<String>,
     tee_pk: Option<String>,
+    pcr0: Option<String>,
     save: bool,
 ) -> Result<()> {
     let mut config = ctx.config()?;
@@ -132,6 +148,7 @@ pub fn attest(
     let root = root
         .or(config.root_hex.clone())
         .context("--root (or a configured trust root) is required")?;
+    let pcr0 = pcr0.or(config.pcr0_hex.clone());
     let measurement_hex = measurement.or(config.measurement_hex.clone());
     let expected = match &measurement_hex {
         Some(hex_str) => Some(hex::decode(hex_str).context("measurement is not hex")?),
@@ -139,16 +156,36 @@ pub fn attest(
     };
 
     let mut session = Session::connect(&server)?;
-    let payload = session.attest(&root, expected.as_deref())?;
+    let payload = session.attest(&root, expected.as_deref(), pcr0.as_deref())?;
 
     println!("attestation verified");
     println!("  module_id:  {}", payload.module_id);
     println!("  digest:     {}", payload.digest);
     println!("  algorithm:  {}", payload.algorithm);
     println!("  timestamp:  {}", payload.timestamp);
+    // `user_data` may be `measurement ‖ tee_pk`; display the measurement
+    // part and the attested envelope key separately.
+    let user_data_bytes = payload
+        .user_data
+        .as_deref()
+        .map(hex::decode)
+        .transpose()
+        .context("user_data is not hex")?;
+    let measurement_only = user_data_bytes.as_deref().map(|bytes| {
+        // The expectation check already bounded the layout to 32 or 64 bytes.
+        hex::encode(&bytes[..bytes.len().min(32)])
+    });
     println!(
         "  measurement: {}",
-        payload.user_data.as_deref().unwrap_or("<none>")
+        measurement_only.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "  envelope key: {}",
+        payload
+            .tee_pk()
+            .map(hex::encode)
+            .as_deref()
+            .unwrap_or("<none (legacy user_data)>")
     );
     println!(
         "  channel key: {}",
@@ -165,13 +202,23 @@ pub fn attest(
         config.server = Some(server);
         config.root_hex = Some(root);
         if config.measurement_hex.is_none() {
-            if let Some(measured) = &payload.user_data {
+            if let Some(measured) = &measurement_only {
                 config.measurement_hex = Some(measured.clone());
                 println!("pinned measurement (trust on first use): {measured}");
             }
         }
+        // Explicit flag wins; otherwise adopt the attested envelope key so
+        // `init --tee-pk` is no longer required for the bootstrap flow.
         if let Some(pk) = tee_pk {
             config.tee_pk_hex = Some(pk);
+        } else if config.tee_pk_hex.is_none() {
+            if let Some(attested) = payload.tee_pk() {
+                config.tee_pk_hex = Some(hex::encode(attested));
+                println!("pinned envelope key (attested): {}", hex::encode(attested));
+            }
+        }
+        if let Some(pcr0) = pcr0 {
+            config.pcr0_hex = Some(pcr0);
         }
         config.channel = payload.public_key.is_some();
         config.save(&ctx.store)?;

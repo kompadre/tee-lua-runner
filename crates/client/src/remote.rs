@@ -35,10 +35,16 @@ impl Session {
 
     /// Freshness challenge → verified attestation payload. On success the
     /// session holds the channel key (when the document binds one).
+    /// Completes the attestation round-trip and verifies the document.
+    ///
+    /// `expected_measurement` binds `user_data` (prefix semantics, see
+    /// [`Expectations::with_user_data`]); `expected_pcr0` — when provided —
+    /// pins the enclave-image PCR0 from the measurements manifest.
     pub fn attest(
         &mut self,
         root_hex: &str,
         expected_measurement: Option<&[u8]>,
+        expected_pcr0: Option<&str>,
     ) -> Result<AttestationPayload> {
         let mut nonce = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -55,7 +61,10 @@ impl Session {
         if let Some(measurement) = expected_measurement {
             expectations = expectations.with_user_data(measurement);
         }
-        let root = TrustRoot::from_hex(root_hex)?;
+        if let Some(pcr0) = expected_pcr0 {
+            expectations = expectations.with_pcr0(pcr0);
+        }
+        let root = TrustRoot::parse(root_hex)?;
         let payload = tee_attest::verify(&root, &document, &expectations)
             .context("attestation verification failed")?;
 

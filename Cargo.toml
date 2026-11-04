@@ -32,6 +32,12 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 zeroize = "1"
 vsock = "0.5"
+# Stage 7: real Nitro attestation documents (client-side verification is
+# hand-rolled pure-Rust per user decision; the NSM device API is AWS's own).
+x509-parser = "0.18"
+p384 = "0.13"
+aws-nitro-enclaves-nsm-api = "0.5"
+serde_bytes = "0.11"
 
 # Deterministic release builds for stable EIF measurements.
 [profile.release]

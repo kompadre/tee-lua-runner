@@ -65,8 +65,12 @@ enum Commands {
         /// Pinned TEE envelope key (hex).
         #[arg(long)]
         tee_pk: Option<String>,
+        /// Expected enclave-image PCR0 (hex, from the measurements
+        /// manifest); enforced when present, falls back to config.
+        #[arg(long)]
+        pcr0: Option<String>,
         /// Save pins to the config (root, server, TOFU measurement,
-        /// discovered channel mode).
+        /// attested envelope key, PCR0, discovered channel mode).
         #[arg(long)]
         save: bool,
     },
@@ -130,8 +134,9 @@ fn run() -> Result<()> {
             root,
             measurement,
             tee_pk,
+            pcr0,
             save,
-        } => commands::attest(&ctx, server, root, measurement, tee_pk, save),
+        } => commands::attest(&ctx, server, root, measurement, tee_pk, pcr0, save),
         Commands::Generate { name, length } => commands::generate(&ctx, &name, length),
         Commands::Insert { name } => commands::insert(&ctx, &name),
         Commands::Show { name } => commands::show(&ctx, &name),

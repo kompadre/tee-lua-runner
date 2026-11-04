@@ -694,6 +694,32 @@ fn serve_rejects_nsm_with_mock_attest() {
         .contains("mutually exclusive"));
 }
 
+/// `--nsm /dev/nsm` outside a real enclave fails loudly at startup (no
+/// device) instead of falling back to a weaker backend silently.
+#[test]
+fn serve_device_nsm_fails_loudly_without_dev_nsm() {
+    if std::path::Path::new("/dev/nsm").exists() {
+        return; // running inside an enclave — device backend is correct here
+    }
+    let out = bin()
+        .args([
+            "serve",
+            &example("throttle.wasm"),
+            "--nsm",
+            "/dev/nsm",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("/dev/nsm"),
+        "error must name the device: {stderr}"
+    );
+}
+
 /// Garbage against the stand-in produces an error response, not a crash.
 #[test]
 fn nsm_standin_survives_bad_requests() {
