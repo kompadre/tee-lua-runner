@@ -8,3 +8,16 @@ name = "tpass"
 path = "src/main.rs"
 
 [dependencies]
+tee-crypto = { path = "../tee-crypto" }
+tee-attest = { path = "../tee-attest" }
+tee-proto = { path = "../tee-proto" }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+argon2 = "0.5"
+chacha20poly1305 = { workspace = true }
+rpassword = "7"

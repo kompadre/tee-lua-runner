@@ -11,17 +11,15 @@
 //!   transport error and closes the connection; once a request is open,
 //!   errors travel in-band as usual.
 
-use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value as Json};
 use tee_crypto::ChannelServer;
+use tee_proto::framing;
 
 use runner_core::Runner;
 
-/// Largest accepted frame payload.
-const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// Replay window for channel nonces (oldest evicted beyond this).
 const MAX_NONCES: usize = 4096;
 
@@ -93,7 +91,25 @@ fn handle_conn(
             None => return Ok(()), // clean EOF
         };
         let reply: Vec<u8> = match channel {
-            Some(server) => reply_channel(runner, server, nonces, &frame)?,
+            Some(server) => {
+                if looks_like_json(&frame) {
+                    // Plaintext is allowed ONLY for the attestation
+                    // challenge: the channel key cannot be trusted before
+                    // the client has seen a verified document.
+                    let request: tee_proto::Request =
+                        serde_json::from_slice(&frame).map_err(|err| {
+                            anyhow::anyhow!("plaintext frame is not a valid request: {err}")
+                        })?;
+                    if !matches!(request, tee_proto::Request::Attest { .. }) {
+                        anyhow::bail!(
+                            "channel mode: only attestation requests may be sent in plaintext"
+                        );
+                    }
+                    reply_plain(runner, &frame)?
+                } else {
+                    reply_channel(runner, server, nonces, &frame)?
+                }
+            }
             None => reply_plain(runner, &frame)?,
         };
         write_frame(stream, &reply)?;
@@ -143,25 +159,18 @@ fn reply_channel(
         .map_err(|err| anyhow::anyhow!("sealing channel response: {err}"))
 }
 
+/// First non-whitespace byte is `{` → plaintext JSON rather than CBOR.
+fn looks_like_json(frame: &[u8]) -> bool {
+    frame
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'{')
+}
+
 fn read_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err.into()),
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len == 0 || len > MAX_FRAME {
-        anyhow::bail!("invalid frame length {len} (max {MAX_FRAME})");
-    }
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-    Ok(Some(payload))
+    Ok(framing::read_frame(stream)?)
 }
 
 fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
-    stream.write_all(&(payload.len() as u32).to_be_bytes())?;
-    stream.write_all(payload)?;
-    stream.flush()?;
-    Ok(())
+    Ok(framing::write_frame(stream, payload)?)
 }

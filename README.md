@@ -30,8 +30,8 @@ Stage table mirrors [`TODO.md`](TODO.md), which is authoritative.
 | 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | done |
 | 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | done |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | done |
-| 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | planned — **next** |
-| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | planned |
+| 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | done |
+| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | planned — **next** |
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | planned |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | planned |
 
@@ -49,7 +49,8 @@ crates/
   tee-crypto     identities (Ed25519+X25519, PoP), RFC 9180 HPKE
                  (base + auth modes, RFC-vector-pinned), blind-gatekeeper
                  envelopes E_TEE(E_local(…)), client↔enclave channel
-  client         `tpass` CLI (Stage 5)
+  client         `tpass` CLI: sealed keystore (Argon2id), attestation
+                 bootstrap session, channel fetch/revoke/audit
   enclave-bin    `tee-enclave` entrypoint (Stage 6)
 scripts/
   examples/      example service artifacts (*.wasm, built, not committed)

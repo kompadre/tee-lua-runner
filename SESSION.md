@@ -9,6 +9,54 @@ chronology and gotchas.
 
 ---
 
+## Session 6 — 2026-11-04 — Stage 5 (`tpass` client CLI) [completed → CHANGELOG]
+
+**Stage context:** Stage 5 — the `tpass` client CLI. Instruction 0 armed
+(untouched this session: the gates list needed no change — client tests ride
+gate 3 `cargo test --workspace`).
+
+**Outcome:** `tpass` shipped (commit below) — the full client half of the
+system: sealed keystore (Argon2id), config pins, the attestation-bootstrap
+session (plaintext challenge → verified channel key → channel-wrapped
+requests), and commands `init / attest / generate / insert / show / list /
+rm / revoke / audit`. First-run system e2e through real processes: init →
+attest with TOFU pin (+ wrong-measurement rejection) → insert sealed-at-rest
+→ show recovering plaintext through the gate → wrong-passphrase fails before
+network → generate/list → audit without secrets → revoke → `[blacklisted]`
+refusal → rm → plaintext-fetch refused in channel mode. `just gates` all
+green (26 suites). Detail evicted to CHANGELOG `[Unreleased]`.
+
+**Decisions:**
+- **Keystore format → `TPASSKEY1 ‖ m,t,p (3×u32 LE) ‖ salt(16) ‖
+  nonce(12) ‖ sealed(80)`**: key = Argon2id(passphrase, salt, params) with
+  params recorded in-file (old keystores stay unlockable after default
+  changes); payload = `LocalIdentity::to_seed()` sealed with
+  ChaCha20Poly1305 (AAD-bound to the magic). `Zeroizing` throughout; the
+  public half lives beside it (`public.json`) so **insert/generate need no
+  passphrase** — only show/revoke unlock the secret half.
+- Session bootstrap = plaintext `op:"attest"` challenge (freshness nonce;
+  root + optional pinned measurement enforced) — the only plaintext op
+  accepted in channel mode; channel mode *discovered* from the verified
+  document's `public_key` and persisted by `attest --save`.
+- Config pins: `server`, `root_hex`, `measurement_hex` (TOFU on first
+  attest), `tee_pk_hex` (envelope key — carried in config until Stage 6's
+  both-keys-in-one-attestation question), `channel` flag.
+- Scope additions (flagged per flow): `tpass revoke` (otherwise the Stage 4
+  blacklist is unreachable from the client) and `tpass audit` (read side of
+  the audit ring).
+- New deps (client-only, small/standard): `argon2`, `rpassword`.
+
+**Gotcha added this session:**
+11. `Zeroizing<T>` does not coerce through to `&[u8]`-typed parameters —
+    call `.as_bytes()` / `&*value` explicitly at API boundaries.
+
+**Next session starts at:** Stage 6 (QEMU local enclave environment: vsock,
+NSM stand-in with the same NSM API, rootfs) — breakdown and open questions
+(Q1′ attested time, both-keys attestation, JIT empirical check) evicted from
+`TODO.md` when started.
+
+---
+
 ## Session 5 — 2026-11-04 — Stage 4 (throttle & blacklist service) [completed → CHANGELOG]
 
 **Stage context:** Stage 4 — the reference workload: the pass-like service's

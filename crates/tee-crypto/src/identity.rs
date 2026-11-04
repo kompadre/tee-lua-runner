@@ -112,4 +112,11 @@ impl LocalIdentity {
             .verify_strict(&[POP_DOMAIN, challenge].concat(), &sig)
             .is_ok()
     }
+
+    /// Opens a gate-returned inner envelope (`E_local`) with this identity's
+    /// encryption secret — the client half of the blind-gatekeeper flow.
+    /// The secret never leaves this function.
+    pub fn open_inner(&self, inner: &[u8]) -> Result<Vec<u8>, crate::CryptoError> {
+        crate::envelope::open_local(self.encryption.as_bytes(), inner)
+    }
 }

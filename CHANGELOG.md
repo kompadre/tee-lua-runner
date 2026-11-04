@@ -7,6 +7,33 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **Client (Stage 5, `tpass`)**: pass-like CLI over the full protocol —
+  - **Keystore at rest**: `TPASSKEY1 ‖ m,t,p ‖ salt ‖ nonce ‖ sealed`;
+    Argon2id(passphrase, salt, params — recorded in-file) → ChaCha20Poly1305
+    over `LocalIdentity::to_seed()`; public half stored beside it so
+    **insert/generate need no passphrase**; `Zeroizing` everywhere;
+    no-echo prompts (`rpassword`) or `--passphrase-file`.
+  - **Session bootstrap**: plaintext `op:"attest"` challenge (freshness
+    nonce; root + pinned measurement enforced) → channel key taken only
+    from the *verified* document → channel-wrapped `fetch`/`revoke`/`audit`.
+    `tee-proto` gains the shared **framing** module (u32-length codec, one
+    source for server and client) and the attest request/response variants.
+  - **Config pins** (`config.json`): server, trust root, measurement
+    (trust-on-first-use via `attest --save`), TEE envelope key, discovered
+    channel mode.
+  - Commands: `init`, `attest`, `generate`, `insert`, `show`, `list`, `rm`,
+    plus **`revoke`** (client path to the Stage 4 blacklist) and **`audit`**
+    (audit-ring read side).
+- `tee-guest` throttle service: `attest` capability + attest op (nonce →
+  document binding module measurement and channel key).
+- `tee-runner serve` (channel mode): plaintext frames are accepted **only**
+  for `{"op":"attest"}` — everything else must ride the channel.
+- Tests: client unit suite (keystore roundtrip / wrong passphrase /
+  tampered & malformed keystores, config roundtrip, path-traversal-safe
+  entry names, password generation) + **first-run full-system e2e** through
+  real processes (init → attest TOFU + wrong-pin rejection → sealed insert →
+  show through the gate → revoke → `[blacklisted]` → audit secret-free →
+  plaintext-fetch refusal); `just gates` green (26 suites).
 - Task runner: **`justfile` as a stable command facade** — recipes `gates`
   (all five quality gates, including the new `svc-throttle` gate),
   `guest-tests`, `throttle-tests`, `examples`, `ci`, and
@@ -129,6 +156,13 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Changed
 
+- **`serve` channel mode now refuses plaintext protocol traffic**: only
+  `{"op":"attest"}` may arrive in the clear (it bootstraps the channel key;
+  the client cannot wrap before verifying). The framing codec moved from
+  `runner-cli` into `tee-proto` (single source for both sides). *(Stage 5)*
+- **Resolved Stage 5 open question**: keystore format — Argon2id (params
+  recorded in-file) + ChaCha20Poly1305 over the identity seed, magic
+  `TPASSKEY1`. *(Stage 5)*
 - **Resolved Stage 4 open questions**: rolling-window clock → host time with
   a monotonic floor (rollback fails closed; forward-jump resistance deferred
   to Stage 6 as Q1′); restart persistence → v1 in-memory state with the

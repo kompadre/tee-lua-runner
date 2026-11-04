@@ -19,8 +19,8 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [x] done |
 | 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [x] done |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [x] done |
-| 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [ ] **next** |
-| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] |
+| 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [x] done |
+| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] **next** |
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
 
@@ -28,6 +28,8 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 
 <!-- Stage 4 breakdown + Q1/Q2 evicted to SESSION.md on start (2026-11-04);
      resolved for v1 there with carry-forwards Q1'/Q2'/envelope-key below. -->
+<!-- Stage 5 breakdown (incl. keystore-format resolution) evicted to SESSION.md
+     on start (2026-11-04). -->
 
 ## Open design questions (resolve before/during the named stage)
 

@@ -1,9 +1,12 @@
-//! Wire protocol for the gate/throttle service (Stage 4).
+//! Wire protocol for the gate/throttle service (Stage 4/5).
 //!
 //! JSON payloads ride *inside* the Stage 3 channel (Q3 decision: binary
 //! records outside, JSON payloads inside). The proof-of-possession message
 //! builders are **the** shared contract: the client signs exactly what the
-//! service rebuilds — byte-for-byte, domain-separated.
+//! service rebuilds — byte-for-byte, domain-separated. [`framing`] is the
+//! shared u32-length codec used by both the runner server and `tpass`.
+
+pub mod framing;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +38,13 @@ pub enum Request {
     },
     /// Recent audit-ring entries (key id + decisions; never secrets).
     Audit,
+    /// Attestation challenge (freshness nonce). The one operation allowed
+    /// as plaintext in channel mode — the channel key can only be trusted
+    /// after this round trip verifies.
+    Attest {
+        /// Hex nonce, 1..=64 bytes.
+        nonce_hex: String,
+    },
 }
 
 /// Service → client responses.
@@ -47,6 +57,8 @@ pub enum Response {
     Revoke,
     /// Audit ring snapshot.
     Audit { entries: Vec<AuditEntry> },
+    /// Attestation document (COSE_Sign1 bytes, hex) for the challenge.
+    Attest { doc_hex: String },
     /// Protocol-level failure.
     Error {
         code: ErrorCode,

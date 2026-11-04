@@ -63,6 +63,7 @@ pub fn handle(req: &Value) -> Result<Value, String> {
             pop,
         }) => revoke(&sign_pk, &enc_pk, &pop),
         Ok(Request::Audit) => audit(),
+        Ok(Request::Attest { nonce_hex }) => attest_doc(&nonce_hex),
         Err(err) => err_response(
             ErrorCode::BadRequest,
             format!("malformed request: {err}"),
@@ -363,6 +364,25 @@ fn audit() -> Response {
     }
 }
 
+/// Attestation challenge: binds the caller's freshness nonce (and, via the
+/// runner, the module measurement; via the mock backend, the channel key).
+/// Allowed as plaintext in channel mode — the challenge that bootstraps the
+/// channel key's trust.
+fn attest_doc(nonce_hex: &str) -> Response {
+    let Ok(nonce) = hex::decode(nonce_hex) else {
+        return err_response(ErrorCode::BadRequest, "nonce must be hex", None);
+    };
+    if nonce.is_empty() || nonce.len() > 64 {
+        return err_response(ErrorCode::BadRequest, "nonce must be 1..=64 bytes", None);
+    }
+    match host::attest(&nonce) {
+        Ok(doc) => Response::Attest {
+            doc_hex: hex::encode(doc),
+        },
+        Err(failure) => internal(failure),
+    }
+}
+
 #[cfg(all(test, feature = "svc-throttle"))]
 mod tests {
     use super::*;
@@ -548,6 +568,24 @@ mod tests {
 
         let resp = handle(&json!({ "op": "unknown" })).unwrap();
         expect_error(&resp, "bad_request");
+
+        let resp = handle(&json!({ "op": "attest", "nonce_hex": "zz" })).unwrap();
+        expect_error(&resp, "bad_request");
+    }
+
+    #[test]
+    fn attest_op_reports_missing_backend_on_native() {
+        // The native mock has no attestation backend; the real serve path
+        // (--mock-attest / NSM) is covered by the CLI e2e.
+        let resp = handle(&json!({ "op": "attest", "nonce_hex": "aabb" })).unwrap();
+        expect_error(&resp, "internal");
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("attestation backend"),
+            "{resp}"
+        );
     }
 
     #[test]

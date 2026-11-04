@@ -117,6 +117,25 @@ fn audit_entry_contains_no_extra_fields() {
 }
 
 #[test]
+fn attest_request_response_shapes() {
+    let request = Request::Attest {
+        nonce_hex: "0011aabb".into(),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"op":"attest","nonce_hex":"0011aabb"}"#);
+    let back: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, request);
+
+    let response = Response::Attest {
+        doc_hex: "cafe".into(),
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert_eq!(json, r#"{"result":"attest","doc_hex":"cafe"}"#);
+    let back: Response = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, response);
+}
+
+#[test]
 fn decode_pk32_validates_lengths() {
     assert!(decode_pk32(&"ab".repeat(32)).is_some());
     assert!(decode_pk32("abcd").is_none());

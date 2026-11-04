@@ -11,6 +11,7 @@ path = "src/main.rs"
 runner-core = { path = "../runner-core" }
 tee-attest = { path = "../tee-attest" }
 tee-crypto = { path = "../tee-crypto" }
+tee-proto = { path = "../tee-proto" }
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
@@ -18,5 +19,4 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
-tee-proto = { path = "../tee-proto" }
 zeroize = { workspace = true }
