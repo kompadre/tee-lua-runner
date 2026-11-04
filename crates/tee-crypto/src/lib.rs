@@ -24,6 +24,13 @@ pub use envelope::{
 };
 pub use identity::{LocalIdentity, PublicIdentity};
 
+/// Derives the X25519 public key of a raw secret (e.g. the provisioned TEE
+/// envelope-unwrap key, or the channel key) — for attestations and clients
+/// that receive only the secret's hex seed.
+pub fn x25519_public(secret: &[u8; 32]) -> [u8; 32] {
+    hpke::public_of(secret)
+}
+
 /// Errors raised by this crate.
 ///
 /// Decryption failures are deliberately collapsed into a single opaque

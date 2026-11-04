@@ -13,6 +13,8 @@ hkdf = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 tee-attest = { path = "../tee-attest" }
+tee-crypto = { path = "../tee-crypto" }
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 # `wat` lets tests build module fixtures from text; it is intentionally absent

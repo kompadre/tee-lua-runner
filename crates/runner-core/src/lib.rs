@@ -12,7 +12,7 @@ pub mod limits;
 pub mod measure;
 
 pub use capability::{Capability, Manifest};
-pub use engine::{measure_module, LogEntry, Runner};
+pub use engine::{measure_module, LogEntry, Runner, RunnerConfig};
 pub use error::{Limit, RunnerError};
 pub use limits::Limits;
 pub use measure::{script_measurement, to_hex, MEASUREMENT_DOMAIN};

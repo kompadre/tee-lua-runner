@@ -3,14 +3,6 @@
 
 use serde_json::Value;
 
-#[cfg(any(
-    feature = "svc-echo",
-    feature = "svc-counter",
-    feature = "svc-hasher",
-    feature = "svc-attest"
-))]
-use serde_json::json;
-
 /// Entry point: routes to the compiled-in service.
 pub fn dispatch(req: &Value) -> Result<Value, String> {
     #[cfg(feature = "svc-echo")]
@@ -29,11 +21,16 @@ pub fn dispatch(req: &Value) -> Result<Value, String> {
     {
         return attest_doc(req);
     }
+    #[cfg(feature = "svc-throttle")]
+    {
+        return crate::throttle::handle(req);
+    }
     #[cfg(not(any(
         feature = "svc-echo",
         feature = "svc-counter",
         feature = "svc-hasher",
-        feature = "svc-attest"
+        feature = "svc-attest",
+        feature = "svc-throttle"
     )))]
     {
         let _ = req;
@@ -44,12 +41,14 @@ pub fn dispatch(req: &Value) -> Result<Value, String> {
 /// Echoes the request back. No capabilities required.
 #[cfg(feature = "svc-echo")]
 fn echo(req: &Value) -> Result<Value, String> {
+    use serde_json::json;
     Ok(json!({ "echo": req }))
 }
 
 /// Rolling counter: demonstrates state + clock + log capabilities.
 #[cfg(feature = "svc-counter")]
 fn counter(req: &Value) -> Result<Value, String> {
+    use serde_json::json;
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let key = req.get("key").and_then(Value::as_str).unwrap_or("default");
     match method {
@@ -78,6 +77,7 @@ fn counter(req: &Value) -> Result<Value, String> {
 /// (crypto + random capabilities).
 #[cfg(feature = "svc-hasher")]
 fn hasher(req: &Value) -> Result<Value, String> {
+    use serde_json::json;
     match req.get("method").and_then(Value::as_str).unwrap_or("") {
         "sha256" => {
             let data = req.get("data").and_then(Value::as_str).unwrap_or("");
@@ -102,6 +102,7 @@ fn hasher(req: &Value) -> Result<Value, String> {
 /// the runner's configured backend for the requested nonce.
 #[cfg(feature = "svc-attest")]
 fn attest_doc(req: &Value) -> Result<Value, String> {
+    use serde_json::json;
     match req.get("method").and_then(Value::as_str).unwrap_or("") {
         "doc" => {
             let nonce_hex = req

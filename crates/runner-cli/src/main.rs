@@ -56,6 +56,10 @@ enum Commands {
         /// (`mock-attest-root: <hex>`) to stderr. For local/QEMU testing only.
         #[arg(long)]
         mock_attest: bool,
+        /// Provision the TEE envelope-unwrap key (X25519 secret, hex32) for
+        /// `gate.unwrap`; prints `tee-pk: <hex>` to stderr.
+        #[arg(long)]
+        tee_key: Option<String>,
     },
     /// Serve length-prefixed JSON frames over TCP.
     ///
@@ -86,6 +90,10 @@ enum Commands {
         /// prints `channel-pk: <hex>` to stderr.
         #[arg(long)]
         channel: bool,
+        /// Provision the TEE envelope-unwrap key (X25519 secret, hex32) for
+        /// `gate.unwrap`; prints `tee-pk: <hex>` to stderr.
+        #[arg(long)]
+        tee_key: Option<String>,
     },
     /// Verify an attestation document against a trust root (reference client).
     Verify {
@@ -115,7 +123,18 @@ fn main() -> ExitCode {
             fuel,
             mem_mib,
             mock_attest,
-        } => cmd_run(&module, &request, cpu_ms, fuel, mem_mib, mock_attest),
+            tee_key,
+        } => cmd_run(
+            &module,
+            &request,
+            ExecOpts {
+                cpu_ms,
+                fuel,
+                mem_mib,
+                mock_attest,
+                tee_key,
+            },
+        ),
         Commands::Serve {
             module,
             listen,
@@ -124,14 +143,18 @@ fn main() -> ExitCode {
             mem_mib,
             mock_attest,
             channel,
+            tee_key,
         } => cmd_serve(
             &module,
             &listen,
-            cpu_ms,
-            fuel,
-            mem_mib,
-            mock_attest,
             channel,
+            ExecOpts {
+                cpu_ms,
+                fuel,
+                mem_mib,
+                mock_attest,
+                tee_key,
+            },
         ),
         Commands::Verify {
             root,
@@ -158,8 +181,42 @@ fn limits(cpu_ms: u64, fuel: u64, mem_mib: usize) -> Limits {
     }
 }
 
+/// Per-invocation execution knobs shared by `run` and `serve`.
+struct ExecOpts {
+    cpu_ms: u64,
+    fuel: u64,
+    mem_mib: usize,
+    mock_attest: bool,
+    tee_key: Option<String>,
+}
+
 fn read_module(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading module {}", path.display()))
+}
+
+/// Parses `--tee-key` and prints the derived public key (stderr, first in
+/// the documented print order: tee-pk, root, channel-pk, measurement).
+fn provision_tee_key(tee_key: Option<&str>) -> Result<Option<[u8; 32]>> {
+    let Some(hex_key) = tee_key else {
+        return Ok(None);
+    };
+    let bytes: [u8; 32] = hex::decode(hex_key.trim())
+        .context("tee-key is not valid hex")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("tee-key must be exactly 32 bytes"))?;
+    eprintln!("tee-pk: {}", hex::encode(tee_crypto::x25519_public(&bytes)));
+    Ok(Some(bytes))
+}
+
+fn runner_config(
+    opts: &ExecOpts,
+    attestor: Option<Arc<dyn Attestor>>,
+) -> runner_core::RunnerConfig {
+    let mut config = runner_core::RunnerConfig::new(limits(opts.cpu_ms, opts.fuel, opts.mem_mib));
+    if let Some(attestor) = attestor {
+        config = config.with_attestor(attestor);
+    }
+    config
 }
 
 /// Builds the attestation backend for `--mock-attest`.
@@ -205,17 +262,15 @@ fn cmd_measure(module: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(
-    module: &Path,
-    request: &Path,
-    cpu_ms: u64,
-    fuel: u64,
-    mem_mib: usize,
-    mock_attest: bool,
-) -> Result<()> {
+fn cmd_run(module: &Path, request: &Path, opts: ExecOpts) -> Result<()> {
     let bytes = read_module(module)?;
-    let attestor = build_attestor(mock_attest, None)?;
-    let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
+    let tee_key = provision_tee_key(opts.tee_key.as_deref())?;
+    let attestor = build_attestor(opts.mock_attest, None)?;
+    let mut config = runner_config(&opts, attestor);
+    if let Some(tee_key) = tee_key {
+        config = config.with_tee_key(tee_key);
+    }
+    let mut runner = Runner::build(&bytes, config)?;
 
     let raw = read_request(request)?;
     let request: serde_json::Value =
@@ -251,31 +306,32 @@ fn print_logs(runner: &mut Runner) {
     }
 }
 
-fn cmd_serve(
-    module: &Path,
-    listen: &str,
-    cpu_ms: u64,
-    fuel: u64,
-    mem_mib: usize,
-    mock_attest: bool,
-    channel: bool,
-) -> Result<()> {
+fn cmd_serve(module: &Path, listen: &str, channel: bool, opts: ExecOpts) -> Result<()> {
     let bytes = read_module(module)?;
 
-    // Channel key first: the mock attestation binds it as `public_key`.
-    // Stderr print order (documented): root, channel-pk, measurement.
+    // Stderr print order (documented): tee-pk, root, channel-pk, measurement.
+    let tee_key = provision_tee_key(opts.tee_key.as_deref())?;
+
+    // Channel key: the mock attestation binds it as `public_key`.
     let channel = if channel {
         let (server, pk) = ChannelServer::generate();
         Some((server, hex::encode(pk)))
     } else {
         None
     };
-    let attestor = build_attestor(mock_attest, channel.as_ref().map(|(_, pk)| pk.as_str()))?;
+    let attestor = build_attestor(
+        opts.mock_attest,
+        channel.as_ref().map(|(_, pk)| pk.as_str()),
+    )?;
     if let Some((_, pk)) = &channel {
         eprintln!("channel-pk: {pk}");
     }
 
-    let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
+    let mut config = runner_config(&opts, attestor);
+    if let Some(tee_key) = tee_key {
+        config = config.with_tee_key(tee_key);
+    }
+    let mut runner = Runner::build(&bytes, config)?;
     eprintln!("module measurement: {}", runner.measurement_hex());
     server::serve(&mut runner, listen, channel.map(|(server, _)| server))
 }

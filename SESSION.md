@@ -9,6 +9,69 @@ chronology and gotchas.
 
 ---
 
+## Session 5 — 2026-11-04 — Stage 4 (throttle & blacklist service) [completed → CHANGELOG]
+
+**Stage context:** Stage 4 — the reference workload: the pass-like service's
+external throttling as an *attested guest module*.
+
+**Outcome:** shipped (commit below) — `gate.unwrap` + `crypto.ed25519_verify`
+host capabilities (TEE secret stays host-side, never in guest memory),
+`RunnerConfig`, `tee-proto` wire contract with byte-stable PoP messages, and
+the `svc-throttle` service (PoP → blacklist → rolling window → gate → audit
+ring) with policy constants in the measured source. Artifact `throttle.wasm`
+199 KB, honest manifest `log,state,clock,crypto,gate`. 88 workspace + 2 + 8
+tests green, incl. full CLI e2e over the channel (fetch→decrypt, 6th-fetch
+throttle with retry hint, revocation, audit without secrets). Detail evicted
+to CHANGELOG `[Unreleased]`.
+
+**Decisions (with carry-forwards):**
+- **Q1 (clock) resolved for v1:** host time + monotonic floor
+  `now = max(host_time, last_seen)` — rollback fails closed. Forward-jump
+  resistance impossible without trusted time → **Q1′ (Stage 6)**.
+- **Q2 (persistence) resolved for v1:** host in-memory state; restarts reset
+  buckets and blacklist → **Q2′ sealed blacklist snapshot (Stage 8)**.
+- New carry-forward: attesting **both** enclave keys (payload has one
+  `public_key`, used for the channel key) → **Stage 6 question**.
+- Identity = *both* keys: PoP message binds `sign_pk ‖ enc_pk ‖
+  sha256(envelope)` so neither key can be substituted independently; throttle
+  buckets and blacklist keyed by `sign_pk`.
+- Replay: content-based PoP (no server-challenge round-trip) is sufficient
+  because the serve layer enforces **one wire nonce → one execution** —
+  implemented in `server.rs` (`NonceCache`, bounded 4096-window: a replayed
+  channel message opens but closes the connection without executing; the
+  cache spans connections for the whole serve process). Test-pinned in the
+  attested-channel e2e.
+- New host capabilities: `gate.unwrap` (own capability module — wrapping
+  must not ride on `crypto`, or any hashing guest could unwrap envelopes)
+  and `crypto.ed25519_verify` (verification primitive; policy stays in the
+  measured guest). Error bridge: host errors carry a stable `code`
+  (`wrong_owner`, …) mapped by the service to protocol codes — no string
+  matching.
+- `runner-core` now depends on sibling `tee-crypto` + `ed25519-dalek`
+  (in-tree, already vetted — not new external surface).
+
+**Gotcha added this session:**
+10. Native guest tests share `thread_local` mock state across the libtest
+    worker pool (tests may run sequentially on one thread) → design tests
+    with per-test unique keys and cap-invariant assertions instead of
+    assuming fresh state.
+
+**Working state / pending user action:**
+- **AGENTS.md gates list needs an amendment** (Instruction 0: only the user
+  prescribes AGENTS text): CI now also runs
+  `cargo test -p tee-guest --features svc-throttle`. Proposed literal
+  addition under the gates block: `cargo test -p tee-guest --features
+  svc-throttle   # gate 5 (throttle service)`. Not applied — waiting for
+  explicit user prescription.
+
+**Next session starts at:** Stage 5 (`tpass` client CLI: init/attest/
+generate/insert/show/list/rm, keystore + zeroize) — breakdown and open
+questions evicted from `TODO.md` when started. **Stage 5 open design
+item:** keystore format (Argon2id KDF + AEAD; `to_seed`/`from_seed` hooks
+exist in Stage 3's `LocalIdentity`).
+
+---
+
 ## Session 4 — 2026-11-04 — Stage 3 (crypto) [completed → CHANGELOG]
 
 **Stage context:** Stage 3 — local identities, HPKE envelopes, E2E channel.

@@ -58,8 +58,18 @@ const HOST_IMPORTS: &[(&str, &[&str])] = &[
     ("state", &["get", "set", "delete", "keys"]),
     ("clock", &["unix_seconds"]),
     ("random", &["bytes"]),
-    ("crypto", &["sha256", "hmac_sha256", "hkdf_sha256", "ct_eq"]),
+    (
+        "crypto",
+        &[
+            "sha256",
+            "hmac_sha256",
+            "hkdf_sha256",
+            "ct_eq",
+            "ed25519_verify",
+        ],
+    ),
     ("attest", &["attest"]),
+    ("gate", &["unwrap"]),
 ];
 
 /// A log record emitted by the guest via the `log` capability.
@@ -75,6 +85,9 @@ struct HostCtx {
     state: HashMap<String, Json>,
     attestor: Option<Arc<dyn Attestor>>,
     measurement: [u8; 32],
+    /// Provisioned TEE envelope-unwrap secret (X25519 scalar). Host-side
+    /// only — never enters guest memory (Stage 4, `gate.unwrap`).
+    tee_key: Option<[u8; 32]>,
 }
 
 type SharedCtx = Arc<Mutex<HostCtx>>;
@@ -161,18 +174,69 @@ fn compile(engine: &Engine, module_bytes: &[u8]) -> Result<Module, RunnerError> 
         .map_err(|err| RunnerError::ScriptLoad(format!("invalid wasm module: {err}")))
 }
 
+/// Everything a runner needs besides the module bytes.
+#[derive(Default)]
+pub struct RunnerConfig {
+    /// Per-request resource budgets.
+    pub limits: Limits,
+    /// Attestation backend for `attest.attest`.
+    pub attestor: Option<Arc<dyn Attestor>>,
+    /// TEE envelope-unwrap secret (X25519 scalar) for `gate.unwrap`.
+    /// Host-side only; never enters guest memory.
+    pub tee_key: Option<[u8; 32]>,
+}
+
+// Redacted: must not expose key material through Debug.
+impl std::fmt::Debug for RunnerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunnerConfig")
+            .field("limits", &self.limits)
+            .field("attestor", &self.attestor.is_some())
+            .field("tee_key", &self.tee_key.map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl RunnerConfig {
+    /// Configuration with explicit limits.
+    pub fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            attestor: None,
+            tee_key: None,
+        }
+    }
+
+    pub fn with_attestor(mut self, attestor: Arc<dyn Attestor>) -> Self {
+        self.attestor = Some(attestor);
+        self
+    }
+
+    pub fn with_tee_key(mut self, tee_key: [u8; 32]) -> Self {
+        self.tee_key = Some(tee_key);
+        self
+    }
+}
+
 impl Runner {
-    /// Loads a module without an attestation backend.
+    /// Loads a module with default configuration (no attestor, no TEE key).
     pub fn new(module_bytes: &[u8], limits: Limits) -> Result<Self, RunnerError> {
-        Self::build(module_bytes, limits, None)
+        Self::build(
+            module_bytes,
+            RunnerConfig {
+                limits,
+                ..RunnerConfig::default()
+            },
+        )
     }
 
     /// Compiles, validates and links a service module.
-    pub fn build(
-        module_bytes: &[u8],
-        limits: Limits,
-        attestor: Option<Arc<dyn Attestor>>,
-    ) -> Result<Self, RunnerError> {
+    pub fn build(module_bytes: &[u8], config: RunnerConfig) -> Result<Self, RunnerError> {
+        let RunnerConfig {
+            limits,
+            attestor,
+            tee_key,
+        } = config;
         let engine = Engine::new(&engine_config())
             .map_err(|err| RunnerError::Internal(format!("engine init: {err}")))?;
         let module = compile(&engine, module_bytes)?;
@@ -185,6 +249,7 @@ impl Runner {
             state: HashMap::new(),
             attestor,
             measurement,
+            tee_key,
         }));
         let linker = build_linker(&engine, &ctx)
             .map_err(|err| RunnerError::Internal(format!("linking host functions: {err}")))?;
@@ -526,6 +591,13 @@ fn host_err(msg: impl Into<String>) -> Json {
     json!({ "ok": false, "error": msg.into() })
 }
 
+/// Error envelope with a stable machine-readable `code` for guest-side
+/// mapping (bridge contract: the code strings below are part of the runner↔
+/// service interface — both sides are attested together).
+fn host_err_code(msg: impl Into<String>, code: &str) -> Json {
+    json!({ "ok": false, "error": msg.into(), "code": code })
+}
+
 /// Bounds-checked read of the JSON argument from guest memory.
 fn read_input(caller: &mut Caller<'_, StoreData>, ptr: i32, len: i32) -> WasmResult<Json> {
     let memory = caller
@@ -713,6 +785,29 @@ fn build_linker(engine: &Engine, ctx: &SharedCtx) -> WasmResult<Linker<StoreData
             move |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| -> WasmResult<i64> {
                 let arg = read_input(&mut caller, ptr, len)?;
                 let envelope = attest_envelope(&ctx, &arg);
+                write_envelope(&mut caller, &envelope)
+            },
+        )?;
+    }
+    {
+        let ctx = ctx.clone();
+        linker.func_wrap(
+            "gate",
+            "unwrap",
+            move |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| -> WasmResult<i64> {
+                let arg = read_input(&mut caller, ptr, len)?;
+                let envelope = gate_unwrap_envelope(&ctx, &arg);
+                write_envelope(&mut caller, &envelope)
+            },
+        )?;
+    }
+    {
+        linker.func_wrap(
+            "crypto",
+            "ed25519_verify",
+            move |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| -> WasmResult<i64> {
+                let arg = read_input(&mut caller, ptr, len)?;
+                let envelope = crypto_ed25519_verify_envelope(&arg);
                 write_envelope(&mut caller, &envelope)
             },
         )?;
@@ -944,17 +1039,98 @@ fn attest_envelope(ctx: &SharedCtx, arg: &Json) -> Json {
     }
 }
 
+/// `gate.unwrap` — the blind-gatekeeper operation: open the outer envelope
+/// with the provisioned TEE key, verify the inner envelope is addressed to
+/// the claimed owner, return the inner blob. Plaintext never exists here
+/// (the inner layer stays sealed to the owner's local key).
+///
+/// Failure codes (`code` field): `bad_request`, `not_provisioned`,
+/// `wrong_owner`, `decrypt_failed`, `malformed`.
+fn gate_unwrap_envelope(ctx: &SharedCtx, arg: &Json) -> Json {
+    let Some(outer_hex) = arg.get("outer_hex").and_then(Json::as_str) else {
+        return host_err_code("gate.unwrap: missing `outer_hex`", "bad_request");
+    };
+    let Some(owner_hex) = arg.get("owner_hex").and_then(Json::as_str) else {
+        return host_err_code("gate.unwrap: missing `owner_hex`", "bad_request");
+    };
+    let Ok(outer) = hex::decode(outer_hex) else {
+        return host_err_code("gate.unwrap: invalid hex in `outer_hex`", "bad_request");
+    };
+    let Ok(owner) = <[u8; 32]>::try_from(hex::decode(owner_hex).unwrap_or_default().as_slice())
+    else {
+        return host_err_code("gate.unwrap: `owner_hex` must be 32 bytes", "bad_request");
+    };
+
+    // Read the key under the lock, then do all crypto lock-free (lock
+    // discipline: never hold the ctx across anything re-entrant).
+    let tee_key = ctx.lock().expect("host ctx lock").tee_key;
+    let Some(tee_key) = tee_key else {
+        return host_err_code("gate.unwrap: no TEE key provisioned", "not_provisioned");
+    };
+    match tee_crypto::tee_unwrap(&tee_key, &outer, &owner) {
+        Ok(inner) => host_ok(Json::String(hex::encode(inner))),
+        Err(tee_crypto::CryptoError::WrongOwner) => host_err_code(
+            "gate.unwrap: envelope addressed to a different owner",
+            "wrong_owner",
+        ),
+        Err(tee_crypto::CryptoError::OpenFailed) => {
+            host_err_code("gate.unwrap: envelope did not decrypt", "decrypt_failed")
+        }
+        Err(tee_crypto::CryptoError::Malformed(_, detail)) => host_err_code(
+            format!("gate.unwrap: malformed envelope: {detail}"),
+            "malformed",
+        ),
+        Err(other) => host_err_code(format!("gate.unwrap: {other}"), "decrypt_failed"),
+    }
+}
+
+/// `crypto.ed25519_verify` — proof-of-possession verification primitive.
+/// Structurally invalid keys/messages are caller errors; a *valid* signature
+/// simply yields `false`.
+fn crypto_ed25519_verify_envelope(arg: &Json) -> Json {
+    let Some(pk_hex) = arg.get("pk_hex").and_then(Json::as_str) else {
+        return host_err("crypto.ed25519_verify: missing `pk_hex`");
+    };
+    let Some(msg_hex) = arg.get("msg_hex").and_then(Json::as_str) else {
+        return host_err("crypto.ed25519_verify: missing `msg_hex`");
+    };
+    let Some(sig_hex) = arg.get("sig_hex").and_then(Json::as_str) else {
+        return host_err("crypto.ed25519_verify: missing `sig_hex`");
+    };
+    let Ok(pk) = <[u8; 32]>::try_from(hex::decode(pk_hex).unwrap_or_default().as_slice()) else {
+        return host_err("crypto.ed25519_verify: invalid `pk_hex`");
+    };
+    let Ok(sig) = <[u8; 64]>::try_from(hex::decode(sig_hex).unwrap_or_default().as_slice()) else {
+        return host_err("crypto.ed25519_verify: invalid `sig_hex`");
+    };
+    let Ok(message) = hex::decode(msg_hex) else {
+        return host_err("crypto.ed25519_verify: invalid `msg_hex`");
+    };
+    let Ok(verifying) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else {
+        return host_err("crypto.ed25519_verify: invalid public key");
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&sig);
+    host_ok(Json::Bool(
+        verifying.verify_strict(&message, &signature).is_ok(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tee_attest::AttestError;
 
     fn test_ctx(attestor: Option<Arc<dyn Attestor>>) -> SharedCtx {
+        test_ctx_full(attestor, None)
+    }
+
+    fn test_ctx_full(attestor: Option<Arc<dyn Attestor>>, tee_key: Option<[u8; 32]>) -> SharedCtx {
         Arc::new(Mutex::new(HostCtx {
             logs: Vec::new(),
             state: HashMap::new(),
             attestor,
             measurement: [7u8; 32],
+            tee_key,
         }))
     }
 
@@ -1158,5 +1334,126 @@ mod tests {
         for (ptr, len) in [(0u32, 0u32), (1, 22), (0xDEAD_BEEF, 0x0102_0304)] {
             assert_eq!(unpack(pack(ptr, len)), (ptr, len));
         }
+    }
+
+    // ---------------------------------------------------------- gate.unwrap
+
+    fn assert_code(envelope: &Json, code: &str) {
+        assert_eq!(envelope.get("ok"), Some(&Json::Bool(false)), "{envelope}");
+        assert_eq!(
+            envelope.get("code"),
+            Some(&Json::String(code.into())),
+            "{envelope}"
+        );
+    }
+
+    #[test]
+    fn gate_unwrap_requires_provisioning() {
+        let ctx = test_ctx_full(None, None);
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({ "outer_hex": hex::encode([0u8; 80]), "owner_hex": hex::encode([1u8; 32]) }),
+        );
+        assert_code(&env, "not_provisioned");
+    }
+
+    #[test]
+    fn gate_unwrap_validates_fields() {
+        let ctx = test_ctx_full(None, Some([42; 32]));
+        let env = gate_unwrap_envelope(&ctx, &json!({}));
+        assert_code(&env, "bad_request");
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({ "outer_hex": "zz", "owner_hex": hex::encode([1u8; 32]) }),
+        );
+        assert_code(&env, "bad_request");
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({ "outer_hex": hex::encode([0u8; 80]), "owner_hex": "abcd" }),
+        );
+        assert_code(&env, "bad_request");
+    }
+
+    #[test]
+    fn gate_unwrap_roundtrip_wrong_owner_and_garbage() {
+        let tee_sk = [42u8; 32];
+        let tee_pk = tee_crypto::x25519_public(&tee_sk);
+        let owner_pk = tee_crypto::x25519_public(&[7u8; 32]);
+        let wrong_pk = tee_crypto::x25519_public(&[8u8; 32]);
+        let envelope = tee_crypto::seal_secret(&tee_pk, &owner_pk, b"password-entry").unwrap();
+
+        let ctx = test_ctx_full(None, Some(tee_sk));
+
+        // Happy path: inner blob comes back still sealed to the owner.
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({
+                "outer_hex": hex::encode(&envelope),
+                "owner_hex": hex::encode(owner_pk),
+            }),
+        );
+        assert_eq!(env.get("ok"), Some(&Json::Bool(true)), "{env}");
+        let inner_hex = env["value"].as_str().unwrap();
+        assert_eq!(
+            tee_crypto::inner_recipient(&hex::decode(inner_hex).unwrap()).unwrap(),
+            owner_pk,
+            "inner must still be addressed to the owner"
+        );
+
+        // Claiming another key fails the owner check (this is the throttle's
+        // core authorization boundary).
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({
+                "outer_hex": hex::encode(&envelope),
+                "owner_hex": hex::encode(wrong_pk),
+            }),
+        );
+        assert_code(&env, "wrong_owner");
+
+        // Structurally broken outer envelope.
+        let env = gate_unwrap_envelope(
+            &ctx,
+            &json!({
+                "outer_hex": hex::encode([0u8; 8]),
+                "owner_hex": hex::encode(owner_pk),
+            }),
+        );
+        assert_code(&env, "malformed");
+    }
+
+    // -------------------------------------------------- crypto.ed25519_verify
+
+    #[test]
+    fn ed25519_verify_validates_and_verifies() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing = SigningKey::from_bytes(&[3u8; 32]);
+        let pk = signing.verifying_key().to_bytes();
+        let message = b"fetch-pop-message";
+        let signature = signing.sign(message).to_bytes();
+
+        let env = crypto_ed25519_verify_envelope(&json!({
+            "pk_hex": hex::encode(pk),
+            "msg_hex": hex::encode(message),
+            "sig_hex": hex::encode(signature),
+        }));
+        assert_eq!(env, json!({"ok": true, "value": true}));
+
+        let env = crypto_ed25519_verify_envelope(&json!({
+            "pk_hex": hex::encode(pk),
+            "msg_hex": hex::encode(b"other-message"),
+            "sig_hex": hex::encode(signature),
+        }));
+        assert_eq!(env, json!({"ok": true, "value": false}));
+
+        let env = crypto_ed25519_verify_envelope(&json!({
+            "pk_hex": "zz",
+            "msg_hex": hex::encode(message),
+            "sig_hex": hex::encode(signature),
+        }));
+        assert_error(&env, "invalid `pk_hex`");
+
+        let env = crypto_ed25519_verify_envelope(&json!({}));
+        assert_error(&env, "missing `pk_hex`");
     }
 }

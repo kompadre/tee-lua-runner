@@ -376,7 +376,8 @@ fn attested_channel_end_to_end() {
         "attestation must bind the channel key"
     );
 
-    // A tampered response frame is rejected by the client.
+    // A tampered response frame is rejected by the client (connection stays
+    // open — the server saw a valid request).
     let (msg2, pending2) = client
         .seal_request(br#"{"method":"doc","nonce_hex":"feedbeef"}"#)
         .unwrap();
@@ -386,13 +387,192 @@ fn attested_channel_end_to_end() {
     response2[middle] ^= 0xff;
     assert!(client.open_response(&pending2, &response2).is_err());
 
+    // Replaying a wire message is a transport error: the nonce was consumed
+    // and the connection closes without executing anything again.
+    write_frame(&mut stream, &msg);
+    assert!(
+        read_raw_frame(&mut stream).is_none(),
+        "replayed channel message must be refused"
+    );
+
     // A tampered request frame never opens on the server side (connection
-    // closes without a reply).
+    // closes without a reply) — on a fresh connection after the replay close.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let mut bad = msg.clone();
     let middle = bad.len() / 2;
     bad[middle] ^= 0xff;
     write_frame(&mut stream, &bad);
     assert!(read_raw_frame(&mut stream).is_none());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Stage 4: the reference workload end-to-end over the channel — provisioned
+/// TEE key, sealed fetch → gate unwrap → client-side decrypt, rolling-window
+/// throttling, revocation, and the audit ring (no secrets).
+#[test]
+fn throttle_service_end_to_end_over_channel() {
+    use std::io::BufRead;
+    use tee_crypto::{open_local, seal_secret, ChannelClient, LocalIdentity};
+    use zeroize::Zeroizing;
+
+    let tee_seed = [42u8; 32];
+    let mut child = bin()
+        .args([
+            "serve",
+            &example("throttle.wasm"),
+            "--tee-key",
+            &hex::encode(tee_seed),
+            "--channel",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // stderr order without --mock-attest: tee-pk, channel-pk, measurement.
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    let tee_pk_hex = line
+        .strip_prefix("tee-pk: ")
+        .expect("tee-pk line")
+        .trim()
+        .to_string();
+    line.clear();
+    stderr.read_line(&mut line).unwrap();
+    let channel_hex = line
+        .strip_prefix("channel-pk: ")
+        .expect("channel line")
+        .trim()
+        .to_string();
+    line.clear();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.starts_with("module measurement: "), "got: {line}");
+
+    let mut line = String::new();
+    {
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut line).unwrap();
+    }
+    let port: u16 = line
+        .trim()
+        .rsplit(':')
+        .next()
+        .expect("listening line")
+        .parse()
+        .unwrap();
+
+    let tee_pk: [u8; 32] = hex::decode(&tee_pk_hex).unwrap().try_into().unwrap();
+    let channel_pk: [u8; 32] = hex::decode(&channel_hex).unwrap().try_into().unwrap();
+    let client = ChannelClient::new(channel_pk);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    let identity = LocalIdentity::from_seed(Zeroizing::new([5u8; 64]));
+    let public = identity.public();
+    let envelope = seal_secret(&tee_pk, &public.encryption, b"s3cr3t-entry").unwrap();
+
+    let fetch_request = || {
+        let pop = identity.sign(&tee_proto::fetch_pop_message(
+            &public.signing,
+            &public.encryption,
+            &envelope,
+        ));
+        serde_json::to_value(tee_proto::Request::Fetch {
+            sign_pk: hex::encode(public.signing),
+            enc_pk: hex::encode(public.encryption),
+            envelope: hex::encode(&envelope),
+            pop: hex::encode(pop),
+        })
+        .unwrap()
+    };
+
+    let mut roundtrip = |request: &serde_json::Value| -> serde_json::Value {
+        let payload = serde_json::to_vec(request).unwrap();
+        let (msg, pending) = client.seal_request(&payload).unwrap();
+        write_frame(&mut stream, &msg);
+        let response = read_raw_frame(&mut stream).expect("channel response");
+        let envelope_bytes = client.open_response(&pending, &response).unwrap();
+        let wrapper: serde_json::Value = serde_json::from_slice(&envelope_bytes).unwrap();
+        assert_eq!(wrapper["ok"], serde_json::json!(true), "{wrapper}");
+        wrapper["response"].clone()
+    };
+
+    // 1. Full blind-gatekeeper flow: fetch returns the inner blob, which the
+    //    client opens with its local key — plaintext never touched the host.
+    let response = roundtrip(&fetch_request());
+    assert_eq!(response["result"], serde_json::json!("fetch"), "{response}");
+    let inner = hex::decode(response["inner"].as_str().unwrap()).unwrap();
+    let seed = identity.to_seed();
+    let owner_sk: [u8; 32] = seed[32..].try_into().unwrap();
+    assert_eq!(open_local(&owner_sk, &inner).unwrap(), b"s3cr3t-entry");
+
+    // 2. Rolling window: exactly MAX_FETCHES succeed, the next is throttled
+    //    with a retry hint.
+    for _ in 0..4 {
+        let response = roundtrip(&fetch_request());
+        assert_eq!(response["result"], serde_json::json!("fetch"), "{response}");
+    }
+    let response = roundtrip(&fetch_request());
+    assert_eq!(response["result"], serde_json::json!("error"), "{response}");
+    assert_eq!(
+        response["code"],
+        serde_json::json!("throttled"),
+        "{response}"
+    );
+    assert!(
+        response["retry_after_ms"].as_u64().unwrap() > 0,
+        "{response}"
+    );
+
+    // 3. Revocation: PoP-gated, then the identity is hard-refused.
+    let revoke = tee_proto::Request::Revoke {
+        sign_pk: hex::encode(public.signing),
+        enc_pk: hex::encode(public.encryption),
+        pop: hex::encode(identity.sign(&tee_proto::revoke_pop_message(
+            &public.signing,
+            &public.encryption,
+        ))),
+    };
+    let response = roundtrip(&serde_json::to_value(revoke).unwrap());
+    assert_eq!(
+        response["result"],
+        serde_json::json!("revoke"),
+        "{response}"
+    );
+    let response = roundtrip(&fetch_request());
+    assert_eq!(
+        response["code"],
+        serde_json::json!("blacklisted"),
+        "{response}"
+    );
+
+    // 4. The audit ring records decisions for this identity and contains no
+    //    secrets.
+    let response = roundtrip(&serde_json::json!({ "op": "audit" }));
+    assert_eq!(response["result"], serde_json::json!("audit"), "{response}");
+    let entries = response["entries"].as_array().unwrap();
+    let owner_hex = hex::encode(public.signing);
+    let outcomes: Vec<&str> = entries
+        .iter()
+        .filter(|e| e["owner"] == serde_json::json!(owner_hex))
+        .filter_map(|e| e["outcome"].as_str())
+        .collect();
+    assert!(outcomes.contains(&"ok"), "{outcomes:?}");
+    assert!(outcomes.contains(&"throttled"), "{outcomes:?}");
+    assert!(outcomes.contains(&"blacklisted"), "{outcomes:?}");
+    let blob = serde_json::to_string(entries).unwrap();
+    assert!(!blob.contains("s3cr3t-entry"), "secret leaked into audit");
+    assert!(!blob.contains(&hex::encode(&envelope)), "envelope leaked");
 
     child.kill().unwrap();
     child.wait().unwrap();

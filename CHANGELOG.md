@@ -7,6 +7,37 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **Throttle service (Stage 4)** — the reference workload as an attested
+  guest module (`svc-throttle`, artifact `throttle.wasm`, 199 KB, manifest
+  `log,state,clock,crypto,gate`):
+  - **New host capabilities** in `runner-core`: `gate.unwrap` (blind-gatekeeper
+    unwrap with the provisioned TEE X25519 key — the secret never enters
+    guest memory; own capability module so hashing guests cannot unwrap) and
+    `crypto.ed25519_verify` (PoP verification primitive). Host errors carry
+    stable machine codes (`wrong_owner`, `decrypt_failed`, `malformed`,
+    `not_provisioned`, `bad_request`) for service-side protocol mapping.
+  - **`RunnerConfig`** (limits + attestor + tee_key) replacing the growing
+    `build()` argument list.
+  - **`tee-proto`**: JSON wire contract (`Request`/`Response`, typed
+    `ErrorCode`s with `retry_after_ms`, `AuditEntry`) and the byte-stable
+    **PoP message builders** — fetch PoP binds `sign_pk ‖ enc_pk ‖
+    sha256(envelope)` (identity = both Stage 3 keys; no substitution).
+  - **Service policy**: PoP → blacklist → rolling window (5 fetches/60 s per
+    identity, monotonic-floor clock: `now = max(host_time, last_seen)` so
+    rollback fails closed) → `gate.unwrap` → audit ring (256 entries, key ids
+    + outcomes only, never secrets); bounded owner buckets (512, least-recent
+    eviction) and blacklist capacity (256, fail-closed); policy constants sit
+    at the top of the measured source.
+  - `tee-runner --tee-key <hex32>` on run/serve, prints `tee-pk: <hex>`
+    (stderr order: tee-pk, root, channel-pk, measurement).
+  - **Serve-side channel nonce replay cache** (`NonceCache`, 4096-window):
+    one wire nonce → one execution across connections; replayed messages
+    close the connection without executing.
+- Tests: 88 workspace + 8 throttle-service (native mock) + CI gate for
+  `svc-throttle`; CLI e2e over the channel: sealed fetch → client decrypt,
+  6th-fetch throttle with retry hint, PoP-gated revocation → hard refuse,
+  audit ring without secrets, replay refusal.
+
 - **Crypto (Stage 3, `tee-crypto`)**:
   - `LocalIdentity` / `PublicIdentity` — Ed25519 (identity + domain-separated
     proof-of-possession) with X25519 (envelope recipient), seed-based,
@@ -89,6 +120,10 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Changed
 
+- **Resolved Stage 4 open questions**: rolling-window clock → host time with
+  a monotonic floor (rollback fails closed; forward-jump resistance deferred
+  to Stage 6 as Q1′); restart persistence → v1 in-memory state with the
+  blacklist-durability gap recorded as Q2′ (Stage 8). *(Stage 4)*
 - **Resolved Stage 3 open questions**: wire format → CBOR for
   envelopes/channel records (request payloads stay JSON until Stage 5
   re-evaluates); envelope construction → RFC 9180 HPKE with official vectors

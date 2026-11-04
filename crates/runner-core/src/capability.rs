@@ -21,17 +21,24 @@ pub enum Capability {
     Crypto,
     /// `attest.attest` — attestation documents.
     Attest,
+    /// `gate.unwrap` — the blind-gatekeeper envelope unwrap (holds the
+    /// provisioned TEE X25519 key on the host side only).
+    Gate,
 }
 
 impl Capability {
     /// Every capability the runner knows, in canonical order.
-    pub const ALL: [Capability; 6] = [
+    ///
+    /// Note: order defines measurement canon — append new capabilities at the
+    /// end so existing artifacts' manifests stay stable.
+    pub const ALL: [Capability; 7] = [
         Capability::Log,
         Capability::State,
         Capability::Clock,
         Capability::Random,
         Capability::Crypto,
         Capability::Attest,
+        Capability::Gate,
     ];
 
     /// The wasm import module name of this capability.
@@ -43,6 +50,7 @@ impl Capability {
             Capability::Random => "random",
             Capability::Crypto => "crypto",
             Capability::Attest => "attest",
+            Capability::Gate => "gate",
         }
     }
 

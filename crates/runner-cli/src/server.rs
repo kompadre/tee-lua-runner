@@ -22,12 +22,47 @@ use runner_core::Runner;
 
 /// Largest accepted frame payload.
 const MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Replay window for channel nonces (oldest evicted beyond this).
+const MAX_NONCES: usize = 4096;
+
+/// One wire nonce may be consumed at most once per serve process: a replayed
+/// channel message opens (HPKE is stateless) but never executes. Bounded
+/// window — beyond [`MAX_NONCES`] the oldest nonces drop out (documented v1
+/// freshness bound).
+struct NonceCache {
+    seen: std::collections::HashSet<[u8; 16]>,
+    order: std::collections::VecDeque<[u8; 16]>,
+}
+
+impl NonceCache {
+    fn new() -> Self {
+        Self {
+            seen: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Returns false if the nonce was already consumed (replay).
+    fn consume(&mut self, nonce: [u8; 16]) -> bool {
+        if !self.seen.insert(nonce) {
+            return false;
+        }
+        self.order.push_back(nonce);
+        if self.order.len() > MAX_NONCES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
+}
 
 pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) -> Result<()> {
     let listener = TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
     let addr = listener.local_addr()?;
     println!("listening on {addr}");
     // Stage 1 simplification: requests are handled sequentially, one at a time.
+    let mut nonces = NonceCache::new();
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
@@ -36,7 +71,7 @@ pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) 
                 continue;
             }
         };
-        if let Err(err) = handle_conn(runner, channel.as_ref(), &mut stream) {
+        if let Err(err) = handle_conn(runner, channel.as_ref(), &mut nonces, &mut stream) {
             eprintln!("connection closed with error: {err:#}");
         }
         for entry in runner.take_logs() {
@@ -49,6 +84,7 @@ pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) 
 fn handle_conn(
     runner: &mut Runner,
     channel: Option<&ChannelServer>,
+    nonces: &mut NonceCache,
     stream: &mut TcpStream,
 ) -> Result<()> {
     loop {
@@ -57,7 +93,7 @@ fn handle_conn(
             None => return Ok(()), // clean EOF
         };
         let reply: Vec<u8> = match channel {
-            Some(server) => reply_channel(runner, server, &frame)?,
+            Some(server) => reply_channel(runner, server, nonces, &frame)?,
             None => reply_plain(runner, &frame)?,
         };
         write_frame(stream, &reply)?;
@@ -76,10 +112,20 @@ fn reply_plain(runner: &mut Runner, frame: &[u8]) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&reply_envelope(runner, &request))?)
 }
 
-fn reply_channel(runner: &mut Runner, server: &ChannelServer, frame: &[u8]) -> Result<Vec<u8>> {
+fn reply_channel(
+    runner: &mut Runner,
+    server: &ChannelServer,
+    nonces: &mut NonceCache,
+    frame: &[u8],
+) -> Result<Vec<u8>> {
     let opened = server
         .open_request(frame)
         .map_err(|err| anyhow::anyhow!("channel request rejected: {err}"))?;
+    // Replay guard: one wire nonce, one execution (cross-connection too —
+    // the cache lives for the whole serve process).
+    if !nonces.consume(opened.nonce) {
+        anyhow::bail!("channel request replayed (nonce already seen)");
+    }
     // Once the channel message is open, errors go back in-band through the
     // authenticated response path (we hold the response keys).
     let envelope = match serde_json::from_slice::<Json>(&opened.request) {
