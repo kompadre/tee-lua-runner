@@ -19,7 +19,7 @@ mod mock;
 mod verify;
 
 pub use mock::MockAttestor;
-pub use verify::{AttestationPayload, Expectations, TrustRoot, VerifyError};
+pub use verify::{verify, AttestationPayload, Expectations, TrustRoot, VerifyError};
 
 /// Errors produced by an attestation backend.
 #[derive(Debug, thiserror::Error)]

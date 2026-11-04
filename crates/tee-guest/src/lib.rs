@@ -15,7 +15,13 @@
 compile_error!("only one service feature may be enabled at a time");
 #[cfg(all(feature = "svc-echo", feature = "svc-hasher"))]
 compile_error!("only one service feature may be enabled at a time");
+#[cfg(all(feature = "svc-echo", feature = "svc-attest"))]
+compile_error!("only one service feature may be enabled at a time");
 #[cfg(all(feature = "svc-counter", feature = "svc-hasher"))]
+compile_error!("only one service feature may be enabled at a time");
+#[cfg(all(feature = "svc-counter", feature = "svc-attest"))]
+compile_error!("only one service feature may be enabled at a time");
+#[cfg(all(feature = "svc-hasher", feature = "svc-attest"))]
 compile_error!("only one service feature may be enabled at a time");
 
 pub mod host;

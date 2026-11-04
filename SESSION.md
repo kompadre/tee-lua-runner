@@ -9,45 +9,31 @@ chronology and gotchas.
 
 ---
 
-## Session 3 — 2026-11-04 — doc set + Stage 2 (attestation mock)
+## Session 3 — 2026-11-04 — doc set + Stage 2 (attestation mock) [completed → CHANGELOG]
 
-**Stage context:** Stage 2 of `TODO.md`'s stage table — first step of the
-attestation track (Stage 7 later swaps mock root/backend for real NSM +
-AWS root chain without changing the document shape or verify entry point).
+**Outcome:** task pipeline established (AGENTS/TODO/SESSION/CHANGELOG with
+eviction at both transitions, commits `ddfe357` + `dcc158e`). Stage 2 shipped:
+COSE_Sign1 mock attestation end-to-end — `tee-attest` (`MockAttestor`,
+payload schema, `verify` + `TrustRoot`/`Expectations`), `tee-runner
+--mock-attest` + `verify` subcommand, `svc-attest` guest service, 45+2 tests
+green (incl. exhaustive byte-tamper scan and a shape-pinning test). Feature
+detail evicted to CHANGELOG `[Unreleased]`.
 
-**Current task: Stage 2 — attestation mock** (evicted from TODO on start).
-No open questions so far; two dependency decisions recorded below.
+**Decisions:** new deps for `tee-attest` (both minimal, standard):
+`ciborium` (compact CBOR codec) + `ed25519-dalek` (canonical pure-Rust
+Ed25519); mock payload mirrors Nitro fields and PCR0 binds the runner binary
+(sha256 of the executable) so mock documents carry inspectable content.
 
-Breakdown:
-- [~] `tee-attest`: CBOR COSE_Sign1 codec (ciborium; protected header
-      `{"alg":"EdDSA"}`, Sig_structure per RFC 9814) — *in progress: deps
-      added (`ciborium` 0.2, `ed25519-dalek` 2), crate skeleton written*
-- [ ] `tee-attest`: payload schema mirroring Nitro attestation docs
-      (`module_id`, `digest`, `pcrs`, `timestamp`, `nonce`, `user_data`,
-      `algorithm`, optional `public_key`)
-- [ ] `tee-attest`: `MockAttestor` (Ed25519 test root, per-call timestamp)
-      implementing the existing `Attestor` trait
-- [ ] `tee-attest`: `verify()` — signature check (`verify_strict`), nonce
-      /user_data expectations, typed `VerifyError`
-- [ ] `runner-cli`: `--mock-attest` flag (prints `mock-attest-root: <hex>` to
-      stderr; PCR0 = sha256 of the runner binary)
-- [ ] `tee-guest`: `svc-attest` example service (`{"method":"doc",
-      "nonce_hex":…}` → `{"doc_hex":…}`) + build script entry
-- [ ] `runner-cli`: `verify` subcommand (reference client: root hex, optional
-      nonce/user-data expectations, prints payload JSON)
-- [ ] Tests: sign/verify roundtrip, tamper, wrong root, nonce mismatch,
-      user_data binding; CLI e2e (guest → host → doc → verify)
-- [ ] Completion: gates green → evict this breakdown into CHANGELOG, tick
-      Stage 2 in TODO, leave outcome line here → commit
+**Gotcha added this session:**
+7. serde serializes `&[u8]` as a **CBOR array of integers**, not a byte
+   string — sign/parse stay self-consistent while silently producing
+   non-COSE documents (roundtrip tests pass, external tools would reject).
+   Build byte strings via `ciborium::Value::Bytes`; pin the literal shape in
+   a test. (Discovered by eyeballing a hex dump, not by tests.)
 
-**Decisions so far this session:**
-- Doc set created with pipeline flow (AGENTS/TODO/SESSION/CHANGELOG +
-  README links); committed `ddfe357`.
-- New deps for `tee-attest` (both minimal, standard): `ciborium` (compact
-  CBOR codec) + `ed25519-dalek` (canonical pure-Rust Ed25519).
-
-**Next session starts at:** Stage 3 (crypto: identities, HPKE envelopes,
-E2E channel) per `TODO.md`.
+**Next session starts at:** Stage 3 (crypto: Ed25519+X25519 identities, HPKE
+envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel) — its breakdown
+gets evicted from `TODO.md` when started.
 
 ---
 

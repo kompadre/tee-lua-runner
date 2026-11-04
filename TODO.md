@@ -15,15 +15,13 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 0 | Workspace, CI, toolchain pin | [x] done |
 | 1 | Runner core (Lua embedding) | [x] superseded by 1b |
 | 1b | Wasmtime engine pivot: validation, capability imports, measurement, budgets, guest SDK, host CLI | [x] done |
-| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [~] in progress → SESSION.md |
-| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [ ] |
+| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [x] done |
+| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [ ] **next** |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [ ] |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [ ] |
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] |
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
-
-<!-- Stage 2 breakdown evicted to SESSION.md on start (2026-11-04). -->
 
 
 ## Open design questions (resolve before/during the named stage)

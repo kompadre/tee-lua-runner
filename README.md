@@ -24,7 +24,7 @@ per identity. It never sees plaintext and never persists request contents.
 |-------|-------|-------|
 | 0 | Workspace, CI, toolchain pin | done |
 | 1 | Runner core: Wasmtime engine, capability imports, measurement, budgets, host CLI, guest SDK | done |
-| 2 | Attestation: mock backend, client-side doc verification | planned |
+| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, `tee.attest` e2e | done |
 | 3 | Crypto: identities, envelopes, client↔enclave channel | planned |
 | 4 | Throttle & blacklist service as an attested guest module | planned |
 | 5 | `tpass` client CLI | planned |

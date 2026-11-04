@@ -3,17 +3,20 @@
 //! * `measure` — print the capability manifest and module measurement
 //! * `run`     — handle a single JSON request, print the JSON response
 //! * `serve`   — handle length-prefixed JSON frames over TCP
+//! * `verify`  — verify an attestation document against a trust root
 
 mod server;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use runner_core::{measure_module, Limits, Runner};
+use tee_attest::{Attestor, Expectations, MockAttestor, TrustRoot};
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +51,10 @@ enum Commands {
         /// Guest linear-memory limit in MiB.
         #[arg(long, default_value_t = 32)]
         mem_mib: usize,
+        /// Use a mock Ed25519 attestation backend; prints the trust root
+        /// (`mock-attest-root: <hex>`) to stderr. For local/QEMU testing only.
+        #[arg(long)]
+        mock_attest: bool,
     },
     /// Serve length-prefixed JSON frames over TCP.
     ///
@@ -69,6 +76,25 @@ enum Commands {
         /// Guest linear-memory limit in MiB.
         #[arg(long, default_value_t = 32)]
         mem_mib: usize,
+        /// Use a mock Ed25519 attestation backend; prints the trust root
+        /// (`mock-attest-root: <hex>`) to stderr. For local/QEMU testing only.
+        #[arg(long)]
+        mock_attest: bool,
+    },
+    /// Verify an attestation document against a trust root (reference client).
+    Verify {
+        /// Trust root public key, hex-encoded (32 bytes for the mock root).
+        #[arg(long)]
+        root: String,
+        /// Attestation document, hex-encoded.
+        #[arg(long)]
+        doc: String,
+        /// Expected freshness nonce, hex-encoded.
+        #[arg(long)]
+        nonce: Option<String>,
+        /// Expected user_data (module measurement), hex-encoded.
+        #[arg(long)]
+        user_data: Option<String>,
     },
 }
 
@@ -82,14 +108,22 @@ fn main() -> ExitCode {
             cpu_ms,
             fuel,
             mem_mib,
-        } => cmd_run(&module, &request, cpu_ms, fuel, mem_mib),
+            mock_attest,
+        } => cmd_run(&module, &request, cpu_ms, fuel, mem_mib, mock_attest),
         Commands::Serve {
             module,
             listen,
             cpu_ms,
             fuel,
             mem_mib,
-        } => cmd_serve(&module, &listen, cpu_ms, fuel, mem_mib),
+            mock_attest,
+        } => cmd_serve(&module, &listen, cpu_ms, fuel, mem_mib, mock_attest),
+        Commands::Verify {
+            root,
+            doc,
+            nonce,
+            user_data,
+        } => cmd_verify(&root, &doc, nonce.as_deref(), user_data.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -113,6 +147,25 @@ fn read_module(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading module {}", path.display()))
 }
 
+/// Builds the attestation backend for `--mock-attest`.
+///
+/// The mock's PCR0 binds the runner binary itself (sha256 of the executable),
+/// so mock documents carry an inspectable, honest-looking PCR set. The trust
+/// root is printed to stderr for relying parties (tests, manual flows).
+fn build_attestor(mock_attest: bool) -> Result<Option<Arc<dyn Attestor>>> {
+    if !mock_attest {
+        return Ok(None);
+    }
+    use sha2::{Digest, Sha256};
+    let exe = std::env::current_exe().context("resolving runner binary path")?;
+    let exe_bytes = std::fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
+    let mut pcrs = std::collections::BTreeMap::new();
+    pcrs.insert("0".to_string(), hex::encode(Sha256::digest(&exe_bytes)));
+    let (backend, root) = MockAttestor::generate("tee-runner-mock", pcrs);
+    eprintln!("mock-attest-root: {}", root.to_hex());
+    Ok(Some(Arc::new(backend)))
+}
+
 fn cmd_measure(module: &Path) -> Result<()> {
     let bytes = read_module(module)?;
     let (manifest, measurement) = measure_module(&bytes)?;
@@ -127,9 +180,17 @@ fn cmd_measure(module: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(module: &Path, request: &Path, cpu_ms: u64, fuel: u64, mem_mib: usize) -> Result<()> {
+fn cmd_run(
+    module: &Path,
+    request: &Path,
+    cpu_ms: u64,
+    fuel: u64,
+    mem_mib: usize,
+    mock_attest: bool,
+) -> Result<()> {
     let bytes = read_module(module)?;
-    let mut runner = Runner::new(&bytes, limits(cpu_ms, fuel, mem_mib))?;
+    let attestor = build_attestor(mock_attest)?;
+    let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
 
     let raw = read_request(request)?;
     let request: serde_json::Value =
@@ -165,9 +226,34 @@ fn print_logs(runner: &mut Runner) {
     }
 }
 
-fn cmd_serve(module: &Path, listen: &str, cpu_ms: u64, fuel: u64, mem_mib: usize) -> Result<()> {
+fn cmd_serve(
+    module: &Path,
+    listen: &str,
+    cpu_ms: u64,
+    fuel: u64,
+    mem_mib: usize,
+    mock_attest: bool,
+) -> Result<()> {
     let bytes = read_module(module)?;
-    let mut runner = Runner::new(&bytes, limits(cpu_ms, fuel, mem_mib))?;
+    let attestor = build_attestor(mock_attest)?;
+    let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
     eprintln!("module measurement: {}", runner.measurement_hex());
     server::serve(&mut runner, listen)
+}
+
+fn cmd_verify(root: &str, doc: &str, nonce: Option<&str>, user_data: Option<&str>) -> Result<()> {
+    let root = TrustRoot::from_hex(root)?;
+    let document = hex::decode(doc.trim()).context("doc is not valid hex")?;
+    let mut expectations = Expectations::new();
+    if let Some(nonce) = nonce {
+        expectations =
+            expectations.with_nonce(&hex::decode(nonce.trim()).context("nonce is not valid hex")?);
+    }
+    if let Some(user_data) = user_data {
+        expectations = expectations
+            .with_user_data(&hex::decode(user_data.trim()).context("user_data is not valid hex")?);
+    }
+    let payload = tee_attest::verify(&root, &document, &expectations)?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
 }

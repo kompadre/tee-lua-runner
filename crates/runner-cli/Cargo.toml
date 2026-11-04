@@ -13,3 +13,5 @@ tee-attest = { path = "../tee-attest" }
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

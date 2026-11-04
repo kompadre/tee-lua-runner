@@ -158,6 +158,101 @@ fn run_hasher_sha256() {
     );
 }
 
+/// Full attestation wire path: guest module calls `tee.attest` → mock backend
+/// signs → doc crosses the CLI → relying party verifies signature, freshness
+/// nonce, and the bound module measurement.
+#[test]
+fn mock_attestation_end_to_end() {
+    let mut child = bin()
+        .args(["run", &example("attest.wasm"), "--mock-attest"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"method":"doc","nonce_hex":"001122aabbcc"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let root_hex = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("mock-attest-root: "))
+        .expect("mock root must be printed on stderr")
+        .to_string();
+
+    let resp: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let doc = hex::decode(resp["doc_hex"].as_str().unwrap()).unwrap();
+
+    let module_bytes = std::fs::read(example("attest.wasm")).unwrap();
+    let (_, measurement) = runner_core::measure_module(&module_bytes).unwrap();
+    let root = tee_attest::TrustRoot::from_hex(&root_hex).unwrap();
+    let payload = tee_attest::verify(
+        &root,
+        &doc,
+        &tee_attest::Expectations::new()
+            .with_nonce(&hex::decode("001122aabbcc").unwrap())
+            .with_user_data(&measurement),
+    )
+    .expect("document must verify");
+    assert_eq!(payload.module_id, "tee-runner-mock");
+    assert_eq!(payload.algorithm, "EdDSA");
+    assert_eq!(
+        payload.pcrs.get("0").map(String::len),
+        Some(64),
+        "PCR0 must be a sha256 hex digest of the runner binary"
+    );
+
+    // Any tampering fails.
+    let mut tampered = doc.clone();
+    tampered[8] ^= 0xff;
+    assert!(tee_attest::verify(&root, &tampered, &tee_attest::Expectations::default()).is_err());
+
+    // The `verify` subcommand (reference client) agrees.
+    let out = bin()
+        .args([
+            "verify",
+            "--root",
+            &root_hex,
+            "--doc",
+            &hex::encode(&doc),
+            "--nonce",
+            "001122aabbcc",
+            "--user-data",
+            &hex::encode(measurement),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "verify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(printed["module_id"], serde_json::json!("tee-runner-mock"));
+
+    // A wrong nonce is rejected with a non-zero exit.
+    let out = bin()
+        .args([
+            "verify",
+            "--root",
+            &root_hex,
+            "--doc",
+            &hex::encode(&doc),
+            "--nonce",
+            "deadbeef",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stderr).unwrap().contains("error:"));
+}
+
 fn write_frame(stream: &mut TcpStream, payload: &[u8]) {
     stream
         .write_all(&(payload.len() as u32).to_be_bytes())

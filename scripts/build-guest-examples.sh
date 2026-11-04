@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 target="wasm32-unknown-unknown"
 out_dir="scripts/examples"
 
-for svc in echo counter hasher; do
+for svc in echo counter hasher attest; do
     cargo build -p tee-guest --release --target "$target" \
         --no-default-features --features "svc-${svc}"
     cp "target/${target}/release/tee_guest.wasm" "${out_dir}/${svc}.wasm"

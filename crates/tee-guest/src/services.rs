@@ -3,7 +3,12 @@
 
 use serde_json::Value;
 
-#[cfg(any(feature = "svc-echo", feature = "svc-counter", feature = "svc-hasher"))]
+#[cfg(any(
+    feature = "svc-echo",
+    feature = "svc-counter",
+    feature = "svc-hasher",
+    feature = "svc-attest"
+))]
 use serde_json::json;
 
 /// Entry point: routes to the compiled-in service.
@@ -20,7 +25,16 @@ pub fn dispatch(req: &Value) -> Result<Value, String> {
     {
         return hasher(req);
     }
-    #[cfg(not(any(feature = "svc-echo", feature = "svc-counter", feature = "svc-hasher")))]
+    #[cfg(feature = "svc-attest")]
+    {
+        return attest_doc(req);
+    }
+    #[cfg(not(any(
+        feature = "svc-echo",
+        feature = "svc-counter",
+        feature = "svc-hasher",
+        feature = "svc-attest"
+    )))]
     {
         let _ = req;
         Err("no service compiled into this module".to_string())
@@ -79,6 +93,25 @@ fn hasher(req: &Value) -> Result<Value, String> {
             let b = req.get("b").and_then(Value::as_str).unwrap_or("");
             let equal = crate::host::crypto_ct_eq(a.as_bytes(), b.as_bytes())?;
             Ok(json!({ "equal": equal }))
+        }
+        other => Err(format!("unknown method: {other}")),
+    }
+}
+
+/// Attestation service (attest capability): returns a document produced by
+/// the runner's configured backend for the requested nonce.
+#[cfg(feature = "svc-attest")]
+fn attest_doc(req: &Value) -> Result<Value, String> {
+    match req.get("method").and_then(Value::as_str).unwrap_or("") {
+        "doc" => {
+            let nonce_hex = req
+                .get("nonce_hex")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "attest: missing `nonce_hex`".to_string())?;
+            let nonce = hex::decode(nonce_hex)
+                .map_err(|err| format!("attest: invalid hex nonce: {err}"))?;
+            let doc = crate::host::attest(&nonce)?;
+            Ok(json!({ "doc_hex": hex::encode(&doc) }))
         }
         other => Err(format!("unknown method: {other}")),
     }
