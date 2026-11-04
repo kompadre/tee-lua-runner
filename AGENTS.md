@@ -3,6 +3,17 @@
 Guidance for AI agents (and humans) contributing to **tee-lua-runner**.
 Policy and conventions live here; state lives elsewhere (see Task flow).
 
+## Instruction 0 — AGENTS.md is user-owned (read-only for agents)
+
+`AGENTS.md` (this file, the document proper) must not be modified by an
+agent. The single exception: the user explicitly prompts for an
+addition/modification, **literally describing the change and telling where to
+put it** — then the agent applies exactly that description, nothing more.
+
+To reiterate, this rule is only about modification of the `AGENTS.md` file
+itself. The other documents of the task flow (`TODO.md`, `SESSION.md`,
+`CHANGELOG.md`, `README.md`) remain agent-editable under the rules below.
+
 ## What this project is
 
 A minimal, attestable **WebAssembly runner** (Wasmtime) for TEE platforms,
@@ -12,7 +23,8 @@ plaintext passwords and never persist request contents. Service logic ships
 as wasm guest modules whose bytes + capability manifest are bound into
 attestation documents.
 
-Read `README.md` for architecture; `docs` are linked there.
+Read `README.md` for architecture; the rest of the doc stack (`TODO.md`,
+`SESSION.md`, `CHANGELOG.md`) is linked from there.
 
 ## Task flow (which doc when)
 
@@ -27,7 +39,7 @@ SESSION.md ──(task COMPLETES: evict detail)──▶ CHANGELOG.md [Unrelease
 
 | Doc | Role | When to update |
 |-----|------|----------------|
-| `AGENTS.md` | Stable policy/conventions (this file) | Rarely; only when conventions actually change |
+| `AGENTS.md` | Stable policy/conventions (this file) | Per **Instruction 0**: only when the user literally prescribes the change and its placement |
 | `TODO.md` | **Queue**: stage table + breakdowns/open-questions of *not yet started* tasks + backlog. Evicted on start | When a task starts (evict → SESSION) or completes (tick stage row) |
 | `SESSION.md` | **Workbench + handoff log**: the current task's detail (evicted from TODO), its open questions, stage context, decisions, gotchas, compact outcomes of finished sessions | On task start (adopt detail); on completion (evict detail → CHANGELOG, leave outcome line) |
 | `CHANGELOG.md` | **Completed** user-visible history (`Keep a Changelog`, `[Unreleased]`) | When a task completes: receive the evicted detail as entries |

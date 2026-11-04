@@ -20,16 +20,20 @@ per identity. It never sees plaintext and never persists request contents.
 
 ## Status
 
+Stage table mirrors [`TODO.md`](TODO.md), which is authoritative.
+
 | Stage | Scope | State |
 |-------|-------|-------|
 | 0 | Workspace, CI, toolchain pin | done |
-| 1 | Runner core: Wasmtime engine, capability imports, measurement, budgets, host CLI, guest SDK | done |
-| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, `tee.attest` e2e | done |
-| 3 | Crypto: identities, envelopes, client↔enclave channel | planned |
-| 4 | Throttle & blacklist service as an attested guest module | planned |
-| 5 | `tpass` client CLI | planned |
-| 6 | QEMU local enclave environment (vsock, NSM stand-in) | planned |
-| 7 | EIF build pipeline for AWS Nitro | planned |
+| 1 | Runner core (Lua embedding) | done — superseded by 1b |
+| 1b | Wasmtime engine pivot: validation, capability imports, measurement, budgets, guest SDK, host CLI | done |
+| 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | done |
+| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | planned — **next** |
+| 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | planned |
+| 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | planned |
+| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | planned |
+| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | planned |
+| 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | planned |
 
 ## Layout
 
@@ -39,7 +43,7 @@ crates/
                  script measurement, per-request budgets, host functions
   runner-cli     `tee-runner` host binary (measure / run / serve)
   tee-guest      guest SDK (ABI + typed host wrappers) + example services
-  tee-attest     Attestor trait + backends (null today; mock + NSM later)
+  tee-attest     Attestor trait + backends (null + mock today; NSM later)
   tee-crypto     identities, envelopes, channel (Stage 3)
   tee-proto      wire messages and framing (Stage 3)
   client         `tpass` CLI (Stage 5)
@@ -83,7 +87,7 @@ extern "C" { #[link_name = "get"] fn state_get_raw(ptr: i32, len: i32) -> i64; }
 
 - [`AGENTS.md`](AGENTS.md) — how to work here: conventions, commands, architecture invariants
 - [`TODO.md`](TODO.md) — task board: stages, open design questions, backlog
-- [`SESSION.md`](SESSION.md) — rolling handoff log: last session's outcome, gotchas, next step
+- [`SESSION.md`](SESSION.md) — workbench for the current task + handoff log (gotchas, next step)
 - [`CHANGELOG.md`](CHANGELOG.md) — user-visible history
 
 ## Development
@@ -96,6 +100,12 @@ cargo test -p tee-guest --features svc-counter  # native guest service tests
 cargo run -p runner-cli -- measure scripts/examples/counter.wasm
 echo '{"method":"incr"}' | cargo run -p runner-cli -- run scripts/examples/counter.wasm
 cargo run -p runner-cli -- serve scripts/examples/counter.wasm --listen 127.0.0.1:7000
+
+# Stage 2: attestation round trip
+echo '{"method":"doc","nonce_hex":"0011"}' | \
+  cargo run -p runner-cli -- run scripts/examples/attest.wasm --mock-attest
+# stderr prints "mock-attest-root: <hex>"; verify the returned doc_hex:
+cargo run -p runner-cli -- verify --root <hex> --doc <hex> --nonce 0011
 ```
 
 `serve` speaks u32-big-endian-length-prefixed JSON frames and wraps responses

@@ -26,6 +26,13 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 - Doc pipeline: `AGENTS.md`/`TODO.md`/`SESSION.md`/`CHANGELOG.md` with the
   eviction contract (TODO → SESSION on task start → CHANGELOG on completion);
   README links them. *(ddfe357, dcc158e)*
+- **AGENTS.md is user-owned (Instruction 0)**: agents modify it only when the
+  user literally prescribes the change and its placement (scope: the AGENTS.md
+  file proper; the rest of the stack stays agent-editable). Added together
+  with a full doc-stack consistency audit — `TODO.md` declared source of
+  truth for the stage table, README's status table mirrors it (stages 1/1b/8
+  restored, "next" marker), stale wording fixed; AGENTS implementation
+  specifics assessed stable and left in place per user decision.
 - Cargo workspace (runner-core, runner-cli, tee-attest, tee-crypto, tee-proto,
   tee-guest, client, enclave-bin) with pinned toolchain
   (`rust-toolchain.toml`: rustc 1.99.1 + `wasm32-unknown-unknown`) and CI

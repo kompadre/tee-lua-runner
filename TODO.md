@@ -1,7 +1,8 @@
 # TODO.md — task board
 
-Legend: `[x]` done · `[~]` in progress · `[ ]` pending. Stage detail lives in
-`README.md`; conventions in `AGENTS.md`.
+Legend: `[x]` done · `[~]` in progress · `[ ]` pending. This stage table is
+the source of truth for stage state (README mirrors it); conventions live in
+`AGENTS.md`.
 
 This file is the **queue**: only tasks not yet started get their breakdown
 here. When a task starts, its breakdown and open questions are **evicted into
@@ -22,7 +23,6 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] |
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
-
 
 ## Open design questions (resolve before/during the named stage)
 

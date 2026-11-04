@@ -12,12 +12,13 @@ chronology and gotchas.
 ## Session 3 — 2026-11-04 — doc set + Stage 2 (attestation mock) [completed → CHANGELOG]
 
 **Outcome:** task pipeline established (AGENTS/TODO/SESSION/CHANGELOG with
-eviction at both transitions, commits `ddfe357` + `dcc158e`). Stage 2 shipped:
-COSE_Sign1 mock attestation end-to-end — `tee-attest` (`MockAttestor`,
-payload schema, `verify` + `TrustRoot`/`Expectations`), `tee-runner
---mock-attest` + `verify` subcommand, `svc-attest` guest service, 45+2 tests
-green (incl. exhaustive byte-tamper scan and a shape-pinning test). Feature
-detail evicted to CHANGELOG `[Unreleased]`.
+eviction at both transitions, commits `ddfe357` + `dcc158e`). Stage 2 shipped
+and committed `29a98ad`: COSE_Sign1 mock attestation end-to-end —
+`tee-attest` (`MockAttestor`, payload schema, `verify` +
+`TrustRoot`/`Expectations`), `tee-runner --mock-attest` + `verify`
+subcommand, `svc-attest` guest service, 45+2 tests green (incl. exhaustive
+byte-tamper scan and a shape-pinning test). Detail evicted to CHANGELOG
+`[Unreleased]`.
 
 **Decisions:** new deps for `tee-attest` (both minimal, standard):
 `ciborium` (compact CBOR codec) + `ed25519-dalek` (canonical pure-Rust
@@ -30,6 +31,25 @@ Ed25519); mock payload mirrors Nitro fields and PCR0 binds the runner binary
    non-COSE documents (roundtrip tests pass, external tools would reject).
    Build byte strings via `ciborium::Value::Bytes`; pin the literal shape in
    a test. (Discovered by eyeballing a hex dump, not by tests.)
+
+**Detour (same session):** AGENTS gained **Instruction 0** — the file is
+user-owned; agents modify it only when the user literally prescribes the
+change and its placement (its task-flow table row updated to defer to it).
+Full doc-stack audit performed; fixes: README stage table now mirrors TODO
+(rows 1/1b/8 restored, "next" marker, TODO = source of truth), stale
+`tee-attest` layout line, SESSION role wording in README, TODO header wording
++ stray blank, README Development gained the Stage 2 verify flow, CHANGELOG
+gained the Instruction 0 entry. Proposal to move implementation details out of
+AGENTS into SESSION → per user: *if everything is stable, leave them there* —
+assessed stable-by-policy (toolchain pin, gates, invariants, guardrails all
+change only via guarded decisions), so **AGENTS content stays as-is**; the one
+self-expiring line (`nitro-cli` not yet installed) gets revisited at Stage 7
+under Instruction 0.
+
+**Working state:** the user **suspended Instruction 0 while documentation work
+is in progress** — agents may edit AGENTS.md directly during this documentation
+session. The suspension ends (Instruction 0 re-arms) when work returns to
+code/stages; the rule itself remains in force otherwise.
 
 **Next session starts at:** Stage 3 (crypto: Ed25519+X25519 identities, HPKE
 envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel) — its breakdown
