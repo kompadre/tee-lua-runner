@@ -6,7 +6,9 @@ edition.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+tee-proto = { path = "../tee-proto" }

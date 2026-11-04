@@ -9,6 +9,83 @@ chronology and gotchas.
 
 ---
 
+## Session 7 — 2026-11-04 — Stage 6 (QEMU local enclave environment) [completed → CHANGELOG]
+
+**Stage context:** Stage 6 — QEMU local enclave: vsock transports, NSM
+stand-in (same NSM API, two backends), rootfs. Instruction 0 armed
+(untouched: no new cargo gate — QEMU validation is `just qemu-demo`, not CI).
+
+**Environment facts (verified this session):**
+- `/dev/kvm` + `/dev/vhost-vsock` present and readable; user `alex` is in
+  the `kvm` group → **no root/sudo needed** (sudo requires a password).
+- Running kernel `6.12.113+deb13-amd64` with matching modules:
+  `vsock.ko.xz`, `vmw_vsock_virtio_transport{,_common}.ko.xz`
+  (`.xz` → decompress into initramfs with `xz -d`); **virtio core
+  (ring/pci) is builtin** (=y) in the Debian kernel.
+- `cpio`, host `busybox` (dynamic → use **docker busybox image, static**),
+  `docker`, `xz`; boot the RUNNING kernel with its own module dir (vermagic).
+
+**Outcome:** shipped and **validated live** (commit below):
+- `tee-proto::transport` — `HOST:PORT` / `vsock:CID:PORT` (dial) /
+  `vsock:PORT` (listen) + `Stream`/`Listener` enums with full parity
+  (incl. timeouts); native-only (cfg + target-gated so guests still build).
+- `tee-attest`: `NsmRequest`/`NsmResponse` NSM-operation ABI mirror (Stage 7
+  = same fields over `/dev/nsm` ioctl) + `NsmRemoteAttestor` (per-request
+  dial, `public_key` request field binds the channel key like real NSM).
+- `tee-runner nsm-standin` — host "firmware": stable root from seed,
+  per-request public_key via fresh-from-seed `MockAttestor`, survives bad
+  requests with error responses (test-pinned).
+- `tee-runner serve --nsm <addr>` — remote attestation backend (mutually
+  exclusive with `--mock-attest`); tpass `--server` accepts vsock.
+- `deploy/qemu/` — `init` (console re-attach, ordered module loads, kernel
+  cmdline config), `build-rootfs.sh` (docker-busybox base, release+stripped
+  runner, ldd libs, un-xz'd modules, cpio), `run.sh` (KVM, TCG fallback,
+  `-device vhost-vsock-pci,guest-cid=3`), `e2e.sh` (full validation),
+  `just qemu-build|qemu-run|qemu-demo`.
+- **`just qemu-demo` PASSED**: guest booted in KVM, served over vsock
+  (CID3), attestation signed by the host stand-in over vsock (CID2),
+  tpass init → attest (TOFU pin == console measurement; channel key bound)
+  → insert → **show recovered the secret through the guest** → audit ring
+  shows `fetch ok`. **JIT empirical check: PASS** (Cranelift JIT works in
+  the guest — `pulley` fallback unnecessary here; real-Nitro kernel still
+  checked at Stage 7/EC2).
+
+**Debug trail worth remembering (became gotchas 12–15):**
+debug-binary initramfs bloat, vanished PID-1 output, serial CRLF, module
+load ordering — see gotchas below.
+
+**Decisions/limits:**
+- QEMU validation is a `just` recipe, **not** a CI gate (needs KVM +
+  vhost-vsock): no AGENTS gates change (Instruction 0 untouched).
+- Stand-in speaks our NSM-operation JSON over the shared framing codec;
+  Stage 7 swaps transport (ioctl) + document format (Nitro) behind the same
+  request/response field set.
+- Carry-forwards unchanged: both-keys slot + attested time → Stage 7 (the
+  single `public_key` slot limitation was re-confirmed by the stand-in ABI).
+
+**Gotchas added this session:**
+12. Never pack debug binaries into an initramfs: the debug `tee-runner` was
+    **214 MB** (debuginfo) → "Initramfs unpacking failed: write error" in a
+    384 MB guest. Pack release + `strip` the copy (release default now).
+13. Initramfs `/dev/console` may not exist when the kernel execs `rdinit` →
+    PID 1 gets `/dev/null` fds and **all userspace output vanishes while
+    kernel printks still appear** (extremely misleading). Re-attach with
+    `exec >/dev/console` *after* mounting devtmpfs.
+14. Serial console output is CRLF → `tr -d '\r'` when parsing console text
+    in scripts (bit my `tee-pk`/measurement comparisons).
+15. Module load order: alphabetical can't resolve deps (`…transport` sorts
+    before `…transport_common`; `vsock` last) and there is no `modules.dep`
+    in an initramfs (`insmod` only) → explicit dependency order + multiple
+    generic retry passes.
+
+**Next session starts at:** Stage 7 (EIF pipeline: container →
+`nitro-cli build-enclave` → measurements manifest, CI artifact, EC2
+runbook) — breakdown and remaining open questions (Q1′ attested time,
+both-keys attestation slot, real JIT check) evicted from `TODO.md` when
+started.
+
+---
+
 ## Session 6 — 2026-11-04 — Stage 5 (`tpass` client CLI) [completed → CHANGELOG]
 
 **Stage context:** Stage 5 — the `tpass` client CLI. Instruction 0 armed

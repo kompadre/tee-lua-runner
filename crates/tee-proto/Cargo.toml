@@ -8,5 +8,10 @@ serde = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+# Native-only: the vsock/TCP transport layer (guests never dial — they are
+# the ones being connected to). The module is cfg-gated to match.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+vsock = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }

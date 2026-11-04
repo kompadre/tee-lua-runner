@@ -31,8 +31,8 @@ Stage table mirrors [`TODO.md`](TODO.md), which is authoritative.
 | 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | done |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | done |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | done |
-| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | planned — **next** |
-| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | planned |
+| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | done |
+| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | planned — **next** |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | planned |
 
 ## Layout
@@ -44,17 +44,23 @@ crates/
   runner-cli     `tee-runner` host binary (measure / run / serve / verify)
   tee-guest      guest SDK (ABI + typed host wrappers), example services and
                  the gate/throttle service (`svc-throttle`)
-  tee-proto      gate-service wire contract (requests/responses, PoP messages)
-  tee-attest     Attestor trait + backends (null + mock today; NSM later)
+  tee-proto      gate-service wire contract (requests/responses, PoP
+                 messages), framing codec, TCP/vsock transports
+  tee-attest     Attestor trait + backends (null, mock, remote NSM
+                 stand-in; real /dev/nsm at Stage 7)
   tee-crypto     identities (Ed25519+X25519, PoP), RFC 9180 HPKE
                  (base + auth modes, RFC-vector-pinned), blind-gatekeeper
                  envelopes E_TEE(E_local(…)), client↔enclave channel
   client         `tpass` CLI: sealed keystore (Argon2id), attestation
                  bootstrap session, channel fetch/revoke/audit
-  enclave-bin    `tee-enclave` entrypoint (Stage 6)
+  enclave-bin    `tee-enclave` entrypoint (placeholder; `tee-runner serve`
+                 is the entrypoint used by the QEMU guest today)
 scripts/
   examples/      example service artifacts (*.wasm, built, not committed)
   build-guest-examples.sh
+deploy/
+  qemu/          enclave-like guest environment: guest init, rootfs build,
+                 QEMU run, full e2e — `just qemu-demo`
 ```
 
 ## Module model
@@ -100,7 +106,10 @@ Quick recipes via [`just`](https://just.systems) (`just --list` shows them
 all): `just gates` runs the five quality gates, `just examples` builds every
 guest artifact, `just ci` does both, `just measure <module>` prints manifest
 + measurement, `just run`/`just serve` wrap the runner with pass-through
-flags. Raw commands below.
+flags, and `just qemu-build` / `just qemu-run` / `just qemu-demo` drive the
+QEMU enclave environment (Stage 6; `qemu-demo` needs `/dev/kvm` +
+`/dev/vhost-vsock` — it is a local validation, not a CI gate). Raw commands
+below.
 
 ```sh
 cargo test --workspace                          # all runner + CLI tests

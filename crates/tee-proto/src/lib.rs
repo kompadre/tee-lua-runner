@@ -7,6 +7,8 @@
 //! shared u32-length codec used by both the runner server and `tpass`.
 
 pub mod framing;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transport;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

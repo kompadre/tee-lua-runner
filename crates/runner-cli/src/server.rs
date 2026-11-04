@@ -11,12 +11,11 @@
 //!   transport error and closes the connection; once a request is open,
 //!   errors travel in-band as usual.
 
-use std::net::{TcpListener, TcpStream};
-
 use anyhow::{Context, Result};
 use serde_json::{json, Value as Json};
 use tee_crypto::ChannelServer;
 use tee_proto::framing;
+use tee_proto::transport::{Addr, Listener, Stream};
 
 use runner_core::Runner;
 
@@ -56,13 +55,13 @@ impl NonceCache {
 }
 
 pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) -> Result<()> {
-    let listener = TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
-    let addr = listener.local_addr()?;
-    println!("listening on {addr}");
+    let addr: Addr = listen.parse::<Addr>().map_err(|err| anyhow::anyhow!(err))?;
+    let listener = Listener::bind(&addr).with_context(|| format!("binding {listen}"))?;
+    println!("listening on {}", listener.local_label()?);
     // Stage 1 simplification: requests are handled sequentially, one at a time.
     let mut nonces = NonceCache::new();
-    for stream in listener.incoming() {
-        let mut stream = match stream {
+    loop {
+        let mut stream = match listener.accept() {
             Ok(stream) => stream,
             Err(err) => {
                 eprintln!("accept failed: {err}");
@@ -76,14 +75,13 @@ pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) 
             eprintln!("log[{}] {}", entry.level, entry.message);
         }
     }
-    Ok(())
 }
 
 fn handle_conn(
     runner: &mut Runner,
     channel: Option<&ChannelServer>,
     nonces: &mut NonceCache,
-    stream: &mut TcpStream,
+    stream: &mut Stream,
 ) -> Result<()> {
     loop {
         let frame = match read_frame(stream)? {
@@ -167,10 +165,10 @@ fn looks_like_json(frame: &[u8]) -> bool {
         .is_some_and(|byte| *byte == b'{')
 }
 
-fn read_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>> {
+fn read_frame(stream: &mut Stream) -> Result<Option<Vec<u8>>> {
     Ok(framing::read_frame(stream)?)
 }
 
-fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
+fn write_frame(stream: &mut Stream, payload: &[u8]) -> Result<()> {
     Ok(framing::write_frame(stream, payload)?)
 }

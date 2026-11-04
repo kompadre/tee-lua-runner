@@ -5,7 +5,6 @@
 //! *verified* document (signature + freshness nonce + optional pinned
 //! measurement), so nothing was trusted from the transport itself.
 
-use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -14,17 +13,18 @@ use serde_json::{json, Value as Json};
 use tee_attest::{AttestationPayload, Expectations, TrustRoot};
 use tee_crypto::ChannelClient;
 use tee_proto::framing::{read_frame, write_frame};
+use tee_proto::transport::{Addr, Stream};
 use tee_proto::{Request, Response};
 
 pub struct Session {
-    stream: TcpStream,
+    stream: Stream,
     channel: Option<ChannelClient>,
 }
 
 impl Session {
     pub fn connect(server: &str) -> Result<Self> {
-        let stream =
-            TcpStream::connect(server).with_context(|| format!("connecting to {server}"))?;
+        let addr: Addr = server.parse::<Addr>().map_err(|err| anyhow::anyhow!(err))?;
+        let stream = Stream::dial(&addr).with_context(|| format!("connecting to {server}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(15)))?;
         stream.set_write_timeout(Some(Duration::from_secs(15)))?;
         Ok(Self {

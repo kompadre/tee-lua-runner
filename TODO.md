@@ -20,8 +20,8 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [x] done |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [x] done |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [x] done |
-| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] **next** |
-| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
+| 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [x] done |
+| 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] **next** |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
 
 <!-- Stage 3 breakdown + its open questions evicted to SESSION.md on start (2026-11-04). -->
@@ -30,21 +30,24 @@ into `CHANGELOG.md` and the stage row below gets ticked.
      resolved for v1 there with carry-forwards Q1'/Q2'/envelope-key below. -->
 <!-- Stage 5 breakdown (incl. keystore-format resolution) evicted to SESSION.md
      on start (2026-11-04). -->
+<!-- Stage 6 breakdown + its questions (JIT, both-keys slot, attested time)
+     evicted to SESSION.md on start (2026-11-04). -->
 
 ## Open design questions (resolve before/during the named stage)
 
-1. **Q1′ — attested time for the rolling window (Stage 6).** v1 (Session 5)
+1. **Q1′ — attested time for the rolling window (Stage 7).** v1 (Session 5)
    uses host time with a monotonic floor (rollback fails closed), but a host
-   that jumps its clock *forward* expires throttle windows early. Needs a
-   trusted signal: boot counters, an attested-time oracle, or policy that
-   tolerates jumps. *Thorniest correctness issue in the throttle design.*
+   that jumps its clock *forward* expires throttle windows early. The NSM
+   ABI already carries a `timestamp`; trusting it needs the real hardware
+   NSM (Stage 7). *Thorniest correctness issue in the throttle design.*
 2. **Q2′ — durable blacklist state (Stage 8).** v1 state is host in-memory:
    restarts reset throttle buckets *and blacklist*. Blacklist durability
    needs an AEAD-sealed snapshot (state integrity vs. the untrusted host).
-3. **Both enclave keys in one attestation (Stage 6).** The payload has a
-   single `public_key` field (used for the channel key); the envelope key
-   needs attesting too — layout decision (combine, extend schema, or bind
-   one via `user_data`).
+3. **Both enclave keys in one attestation (Stage 7).** Discovered in Stage 6:
+   the NSM ABI carries a single `public_key` slot (ours and Nitro's alike) —
+   two fields are impossible. Decide at Stage 7: bind the envelope key via
+   `user_data` composition, reuse one keypair with strict domain
+   separation, or a signed key list. tee-pk stays config-pinned until then.
 4. **JIT inside Nitro enclaves (Stage 6).** Expect Cranelift's RWX mappings
    to work (enclaves are VMs, not SGX), but verify empirically; Wasmtime's
    `pulley` interpreter is the fallback if not.

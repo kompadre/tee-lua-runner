@@ -1,0 +1,65 @@
+#!/bin/sh
+# Guest init for the QEMU enclave environment: mounts, vsock stack, then
+# execs the runner (its console output is what QEMU captures).
+#
+# Re-attach the console FIRST: at rdinit exec time /dev/console may not exist
+# yet (it is created by the devtmpfs mount below), so the kernel can hand us
+# /dev/null fds — every later write would vanish.
+
+mkdir -p /proc /sys /dev /lib/modules /enclave
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+exec >/dev/console 2>&1 || true
+echo "[init] stage: console attached"
+
+# Load the vsock stack in dependency order. Two layers:
+#  1. explicit ordering (alphabetically vmw_vsock_virtio_transport sorts
+#     BEFORE its dependency *_common, and vsock.ko sorts last of all);
+#  2. generic retries for everything else (no modules.dep in an initramfs).
+for mod in \
+    /lib/modules/vsock.ko \
+    /lib/modules/virtio_ring.ko \
+    /lib/modules/virtio_pci_modern.ko \
+    /lib/modules/virtio_pci.ko \
+    /lib/modules/vmw_vsock_virtio_transport_common.ko \
+    /lib/modules/vmw_vsock_virtio_transport.ko
+do
+    [ -f "$mod" ] || continue
+    insmod "$mod" 2>/dev/null || echo "[init] insmod failed: $mod"
+done
+for pass in 1 2 3; do
+    for mod in /lib/modules/*.ko; do
+        [ -f "$mod" ] || continue
+        insmod "$mod" 2>/dev/null || true
+    done
+done
+echo "[init] stage: modules loaded"
+
+# Configuration arrives via the kernel command line (set by run.sh/e2e.sh):
+#   teekey=<hex32> listen=<port> nsm=vsock:<cid>:<port>
+TEE_KEY=""
+LISTEN=""
+NSM=""
+for token in $(cat /proc/cmdline); do
+    case "$token" in
+        teekey=*) TEE_KEY="${token#teekey=}" ;;
+        listen=*) LISTEN="${token#listen=}" ;;
+        nsm=*) NSM="${token#nsm=}" ;;
+    esac
+done
+
+if [ -z "$TEE_KEY" ] || [ -z "$LISTEN" ] || [ -z "$NSM" ]; then
+    echo "[init] missing teekey=/listen=/nsm= on the kernel command line"
+    sleep 5
+    exit 1
+fi
+
+echo "[init] starting tee-runner: listen=vsock:${LISTEN} nsm=${NSM}"
+# Attestation comes from the HOST stand-in over vsock (like real Nitro: the
+# guest cannot self-sign); the channel and tee keys are provisioned in-guest.
+exec /enclave/tee-runner serve /enclave/throttle.wasm \
+    --listen "vsock:${LISTEN}" \
+    --tee-key "$TEE_KEY" \
+    --channel \
+    --nsm "$NSM"

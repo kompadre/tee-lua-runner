@@ -16,9 +16,11 @@
 
 mod cose;
 mod mock;
+mod nsm;
 mod verify;
 
 pub use mock::MockAttestor;
+pub use nsm::{NsmRemoteAttestor, NsmRequest, NsmResponse};
 pub use verify::{verify, AttestationPayload, Expectations, TrustRoot, VerifyError};
 
 /// Errors produced by an attestation backend.

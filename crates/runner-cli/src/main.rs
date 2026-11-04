@@ -90,10 +90,34 @@ enum Commands {
         /// prints `channel-pk: <hex>` to stderr.
         #[arg(long)]
         channel: bool,
+        /// Fetch attestation documents from an NSM stand-in at this address
+        /// (`HOST:PORT` or `vsock:CID:PORT`) instead of signing in-process.
+        /// The stand-in prints the trust root. Mutually exclusive with
+        /// `--mock-attest`.
+        #[arg(long)]
+        nsm: Option<String>,
         /// Provision the TEE envelope-unwrap key (X25519 secret, hex32) for
         /// `gate.unwrap`; prints `tee-pk: <hex>` to stderr.
         #[arg(long)]
         tee_key: Option<String>,
+    },
+    /// Host-side NSM stand-in daemon: the "firmware" that signs attestation
+    /// documents on request (same operation API as the real `/dev/nsm`;
+    /// Stage 7 swaps this for the ioctl backend).
+    NsmStandin {
+        /// Listen address: `HOST:PORT` or `vsock:PORT`.
+        #[arg(long)]
+        listen: String,
+        /// Stable Ed25519 root seed (hex32); generated (and NOT printed)
+        /// when absent — the *trust root* line is what clients need.
+        #[arg(long)]
+        seed_hex: Option<String>,
+        /// Value for pcr[0] (hex) to embed in documents.
+        #[arg(long)]
+        pcr0: Option<String>,
+        /// module_id for documents (default `nsm-standin`).
+        #[arg(long)]
+        module_id: Option<String>,
     },
     /// Verify an attestation document against a trust root (reference client).
     Verify {
@@ -143,11 +167,13 @@ fn main() -> ExitCode {
             mem_mib,
             mock_attest,
             channel,
+            nsm,
             tee_key,
         } => cmd_serve(
             &module,
             &listen,
             channel,
+            nsm,
             ExecOpts {
                 cpu_ms,
                 fuel,
@@ -156,6 +182,12 @@ fn main() -> ExitCode {
                 tee_key,
             },
         ),
+        Commands::NsmStandin {
+            listen,
+            seed_hex,
+            pcr0,
+            module_id,
+        } => cmd_nsm_standin(listen, seed_hex, pcr0, module_id),
         Commands::Verify {
             root,
             doc,
@@ -306,23 +338,38 @@ fn print_logs(runner: &mut Runner) {
     }
 }
 
-fn cmd_serve(module: &Path, listen: &str, channel: bool, opts: ExecOpts) -> Result<()> {
+fn cmd_serve(
+    module: &Path,
+    listen: &str,
+    channel: bool,
+    nsm: Option<String>,
+    opts: ExecOpts,
+) -> Result<()> {
+    if nsm.is_some() && opts.mock_attest {
+        anyhow::bail!("--nsm and --mock-attest are mutually exclusive");
+    }
     let bytes = read_module(module)?;
 
-    // Stderr print order (documented): tee-pk, root, channel-pk, measurement.
+    // Stderr print order (documented): tee-pk, root (mock only), channel-pk,
+    // measurement. With --nsm the trust root is printed by the stand-in.
     let tee_key = provision_tee_key(opts.tee_key.as_deref())?;
 
-    // Channel key: the mock attestation binds it as `public_key`.
+    // Channel key: bound into whichever attestation backend is active.
     let channel = if channel {
         let (server, pk) = ChannelServer::generate();
         Some((server, hex::encode(pk)))
     } else {
         None
     };
-    let attestor = build_attestor(
-        opts.mock_attest,
-        channel.as_ref().map(|(_, pk)| pk.as_str()),
-    )?;
+    let channel_pk = channel.as_ref().map(|(_, pk)| pk.as_str());
+    let attestor = match &nsm {
+        Some(addr) => {
+            let backend = tee_attest::NsmRemoteAttestor::new(addr, channel_pk.map(String::from))
+                .map_err(|err| anyhow::anyhow!(err))?;
+            Some(Arc::new(backend) as Arc<dyn Attestor>)
+        }
+        None => build_attestor(opts.mock_attest, channel_pk)?,
+    };
     if let Some((_, pk)) = &channel {
         eprintln!("channel-pk: {pk}");
     }
@@ -334,6 +381,109 @@ fn cmd_serve(module: &Path, listen: &str, channel: bool, opts: ExecOpts) -> Resu
     let mut runner = Runner::build(&bytes, config)?;
     eprintln!("module measurement: {}", runner.measurement_hex());
     server::serve(&mut runner, listen, channel.map(|(server, _)| server))
+}
+
+/// The host-side stand-in "firmware": signs documents on request over the
+/// NSM operation API (same request/response fields Stage 7 moves to the
+/// `/dev/nsm` ioctl). Holds the mock root seed; per-request `public_key`
+/// binding uses a fresh-from-seed backend so the root stays stable.
+fn cmd_nsm_standin(
+    listen: String,
+    seed_hex: Option<String>,
+    pcr0: Option<String>,
+    module_id: Option<String>,
+) -> Result<()> {
+    use rand::RngCore;
+    use tee_proto::transport::{Addr, Listener};
+
+    let seed: [u8; 32] = match seed_hex {
+        Some(hex_str) => hex::decode(hex_str.trim())
+            .context("seed is not valid hex")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("seed must be exactly 32 bytes"))?,
+        None => {
+            let mut seed = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut seed);
+            seed
+        }
+    };
+    let module_id = module_id.unwrap_or_else(|| "nsm-standin".to_string());
+    let pcrs: std::collections::BTreeMap<String, String> = pcr0
+        .map(|value| std::collections::BTreeMap::from([("0".to_string(), value)]))
+        .unwrap_or_default();
+
+    // Clients need the *trust root*, never the seed.
+    let (_, root) = MockAttestor::from_seed(module_id.clone(), pcrs.clone(), seed);
+    eprintln!("nsm-standin trust root: {}", root.to_hex());
+
+    let addr: Addr = listen.parse::<Addr>().map_err(|err| anyhow::anyhow!(err))?;
+    let listener = Listener::bind(&addr).with_context(|| format!("binding {listen}"))?;
+    println!("nsm-standin listening on {}", listener.local_label()?);
+
+    loop {
+        let mut stream = match listener.accept() {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("accept failed: {err}");
+                continue;
+            }
+        };
+        if let Err(err) = handle_nsm_conn(&mut stream, seed, &module_id, &pcrs) {
+            eprintln!("nsm connection error: {err:#}");
+        }
+    }
+}
+
+fn handle_nsm_conn(
+    stream: &mut tee_proto::transport::Stream,
+    seed: [u8; 32],
+    module_id: &str,
+    pcrs: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(request_bytes) = tee_proto::framing::read_frame(stream)? else {
+        return Ok(());
+    };
+    let response = match serde_json::from_slice::<tee_attest::NsmRequest>(&request_bytes) {
+        Ok(request) => {
+            let outcome = (|| -> Result<Vec<u8>, String> {
+                let decode = |value: Option<&str>, what: &str| -> Result<Vec<u8>, String> {
+                    match value {
+                        Some(hex_str) => {
+                            hex::decode(hex_str).map_err(|err| format!("invalid {what} hex: {err}"))
+                        }
+                        None => Ok(Vec::new()),
+                    }
+                };
+                let nonce = decode(request.nonce.as_deref(), "nonce")?;
+                let user_data = decode(request.user_data.as_deref(), "user_data")?;
+                let (backend, _) =
+                    MockAttestor::from_seed(module_id.to_string(), pcrs.clone(), seed);
+                let backend = match request.public_key {
+                    Some(public_key) => backend.with_public_key(public_key),
+                    None => backend,
+                };
+                backend
+                    .attest(&nonce, &user_data)
+                    .map_err(|err| err.to_string())
+            })();
+            match outcome {
+                Ok(document) => tee_attest::NsmResponse {
+                    document: Some(hex::encode(document)),
+                    error: None,
+                },
+                Err(err) => tee_attest::NsmResponse {
+                    document: None,
+                    error: Some(err),
+                },
+            }
+        }
+        Err(err) => tee_attest::NsmResponse {
+            document: None,
+            error: Some(format!("bad request: {err}")),
+        },
+    };
+    tee_proto::framing::write_frame(stream, &serde_json::to_vec(&response)?)?;
+    Ok(())
 }
 
 fn cmd_verify(root: &str, doc: &str, nonce: Option<&str>, user_data: Option<&str>) -> Result<()> {

@@ -4,3 +4,5 @@
 .DS_Store
 # Guest example artifacts (built by scripts/build-guest-examples.sh)
 /scripts/examples/*.wasm
+# QEMU environment build outputs (rootfs, initramfs, run logs)
+/deploy/qemu/build/

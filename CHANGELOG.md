@@ -7,6 +7,34 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **QEMU local enclave environment (Stage 6)** — the enclave architecture
+  without real Nitro, validated live end-to-end (`just qemu-demo`):
+  - **Transports** (`tee-proto::transport`): `HOST:PORT` /
+    `vsock:CID:PORT` (dial) / `vsock:PORT` (listen) with `Stream`/`Listener`
+    enums (full TCP parity incl. timeouts). Native-only (cfg +
+    target-gated — guests keep building).
+  - **NSM-operation ABI** (`tee-attest`): `NsmRequest`/`NsmResponse`
+    mirroring `GetAttestationDoc`'s fields (Stage 7: same fields over the
+    `/dev/nsm` ioctl) + `NsmRemoteAttestor` (per-request dial; the
+    `public_key` request field binds the channel key, like real NSM).
+  - **`tee-runner nsm-standin`**: host-side "firmware" daemon — stable trust
+    root from a seed, per-request `public_key` binding, malformed requests
+    answered with error responses (never crashes).
+  - **`tee-runner serve --nsm <addr>`**: remote attestation backend
+    (mutually exclusive with `--mock-attest`) so the guest never self-signs;
+    `tpass --server` accepts vsock addresses.
+  - **`deploy/qemu/`**: guest `init` (console re-attach, dependency-ordered
+    vsock module loads, kernel-cmdline config), `build-rootfs.sh`
+    (static-busybox base via docker, release+stripped runner, host libs,
+    decompressed modules, cpio), `run.sh` (KVM with TCG fallback,
+    `vhost-vsock-pci`, guest CID 3), `e2e.sh` (full validation), and
+    `just qemu-build` / `qemu-run` / `qemu-demo`.
+  - Validation result: guest booted under KVM, served over vsock, attestation
+    served by the host stand-in over a second vsock channel, tpass
+    init → attest → insert → **show recovered the secret through the guest**,
+    audit ring recorded `fetch ok`. Empirical JIT check **passed**
+    (Cranelift runs in the guest; `pulley` fallback unnecessary — real
+    Nitro kernel re-checked at Stage 7/EC2).
 - **Client (Stage 5, `tpass`)**: pass-like CLI over the full protocol —
   - **Keystore at rest**: `TPASSKEY1 ‖ m,t,p ‖ salt ‖ nonce ‖ sealed`;
     Argon2id(passphrase, salt, params — recorded in-file) → ChaCha20Poly1305

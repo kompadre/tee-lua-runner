@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Once;
 use std::time::Duration;
 
+use tee_attest::Attestor as _;
 use tee_crypto::ChannelClient;
 
 /// Builds scripts/examples/*.wasm once per test process.
@@ -573,6 +574,185 @@ fn throttle_service_end_to_end_over_channel() {
     let blob = serde_json::to_string(entries).unwrap();
     assert!(!blob.contains("s3cr3t-entry"), "secret leaked into audit");
     assert!(!blob.contains(&hex::encode(&envelope)), "envelope leaked");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// The NSM seam, end-to-end without QEMU: stand-in daemon → remote attestor
+/// → verification (signature, freshness, user_data, pcr0, public_key
+/// binding). This is exactly the flow the QEMU guest drives over vsock.
+#[test]
+fn nsm_standin_and_remote_attestor_roundtrip() {
+    use std::io::BufRead;
+
+    let mut child = bin()
+        .args([
+            "nsm-standin",
+            "--listen",
+            "127.0.0.1:0",
+            "--seed-hex",
+            &hex::encode([77u8; 32]),
+            "--pcr0",
+            &"ab".repeat(32),
+            "--module-id",
+            "qemu-guest-mock",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    let root_hex = line
+        .strip_prefix("nsm-standin trust root: ")
+        .expect("root line")
+        .trim()
+        .to_string();
+    let mut line = String::new();
+    {
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut line).unwrap();
+    }
+    let port: u16 = line
+        .trim()
+        .rsplit(':')
+        .next()
+        .expect("listening line")
+        .parse()
+        .unwrap();
+
+    // Bind a fake channel key like an enclave would (NSM public_key field).
+    let channel_pk_hex = hex::encode([9u8; 32]);
+    let attestor = tee_attest::NsmRemoteAttestor::new(
+        &format!("127.0.0.1:{port}"),
+        Some(channel_pk_hex.clone()),
+    )
+    .unwrap();
+
+    let nonce = b"fresh-challenge";
+    let measurement = [5u8; 32];
+    let document = attestor.attest(nonce, &measurement).unwrap();
+
+    let root = tee_attest::TrustRoot::from_hex(&root_hex).unwrap();
+    let payload = tee_attest::verify(
+        &root,
+        &document,
+        &tee_attest::Expectations::new()
+            .with_nonce(nonce)
+            .with_user_data(&measurement),
+    )
+    .expect("stand-in document must verify");
+    assert_eq!(payload.module_id, "qemu-guest-mock");
+    assert_eq!(
+        payload.pcrs.get("0").map(String::as_str),
+        Some(("ab".repeat(32)).as_str()),
+        "pcr0 must round-trip"
+    );
+    assert_eq!(
+        payload.public_key.as_deref(),
+        Some(channel_pk_hex.as_str()),
+        "channel key must be bound via the NSM public_key field"
+    );
+
+    // Wrong expectations are rejected.
+    let err = tee_attest::verify(
+        &root,
+        &document,
+        &tee_attest::Expectations::new().with_nonce(b"other"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, tee_attest::VerifyError::NonceMismatch),
+        "{err:?}"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// `--nsm` and `--mock-attest` are mutually exclusive.
+#[test]
+fn serve_rejects_nsm_with_mock_attest() {
+    let out = bin()
+        .args([
+            "serve",
+            &example("throttle.wasm"),
+            "--nsm",
+            "127.0.0.1:9",
+            "--mock-attest",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("mutually exclusive"));
+}
+
+/// Garbage against the stand-in produces an error response, not a crash.
+#[test]
+fn nsm_standin_survives_bad_requests() {
+    use std::io::Read;
+    use tee_proto::framing;
+
+    fn call(port: u16, payload: &[u8]) -> tee_attest::NsmResponse {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        framing::write_frame(&mut stream, payload).unwrap();
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut payload).unwrap();
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    let mut child = bin()
+        .args(["nsm-standin", "--listen", "127.0.0.1:0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    let root_line = line.clone(); // trust root printed first
+    assert!(root_line.contains("nsm-standin trust root:"));
+    let mut line = String::new();
+    {
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut line).unwrap();
+    }
+    let port: u16 = line.trim().rsplit(':').next().unwrap().parse().unwrap();
+
+    // Not JSON at all → error response, connection survives.
+    let response = call(port, b"garbage");
+    assert!(
+        response.error.as_deref().unwrap().contains("bad request"),
+        "{response:?}"
+    );
+    assert!(response.document.is_none());
+
+    // JSON with wrong field types → same treatment.
+    let response = call(port, br#"{"nonce":42}"#);
+    assert!(response.error.is_some(), "{response:?}");
+
+    // The daemon is still alive after abuse.
+    let attestor = tee_attest::NsmRemoteAttestor::new(&format!("127.0.0.1:{port}"), None).unwrap();
+    let doc = attestor.attest(b"n", &[1u8; 32]).unwrap();
+    let root_hex = root_line
+        .strip_prefix("nsm-standin trust root: ")
+        .unwrap()
+        .trim();
+    tee_attest::verify(
+        &tee_attest::TrustRoot::from_hex(root_hex).unwrap(),
+        &doc,
+        &tee_attest::Expectations::new().with_nonce(b"n"),
+    )
+    .unwrap();
 
     child.kill().unwrap();
     child.wait().unwrap();

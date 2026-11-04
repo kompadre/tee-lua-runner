@@ -43,6 +43,20 @@ ci: gates examples
 measure file:
     cargo run -q -p runner-cli -- measure {{file}}
 
+# --- QEMU enclave environment (Stage 6) ---
+
+# Build the guest rootfs + initramfs (needs /dev/kvm-friendly host kernel).
+qemu-build:
+    bash deploy/qemu/build-rootfs.sh
+
+# Boot the guest interactively on ttyS0 (Ctrl-A X quits QEMU).
+qemu-run:
+    bash deploy/qemu/run.sh
+
+# Full Stage 6 validation: host NSM stand-in + QEMU guest + tpass over vsock.
+qemu-demo:
+    bash deploy/qemu/e2e.sh
+
 # Handle one JSON request on stdin against a module.
 run module *args:
     cargo run -q -p runner-cli -- run {{module}} {{args}}
