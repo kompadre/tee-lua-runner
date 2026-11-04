@@ -9,6 +9,52 @@ chronology and gotchas.
 
 ---
 
+## Session 4 — 2026-11-04 — Stage 3 (crypto) [completed → CHANGELOG]
+
+**Stage context:** Stage 3 — local identities, HPKE envelopes, E2E channel.
+First code stage after the documentation detour; Instruction 0 re-armed for it.
+
+**Outcome:** `tee-crypto` shipped (commit below) — RFC 9180 HPKE (base +
+auth) pinned against official A.2/A.2.3 vectors on first run, blind-gatekeeper
+envelopes `E_TEE(E_local(…))`, one-shot channel with attested server
+authentication, `LocalIdentity` (Ed25519+X25519, zeroize, PoP), `serve
+--channel` with the channel key bound into the attestation's `public_key`.
+68 workspace + 2 guest tests green, incl. exhaustive byte-tamper scans on
+envelopes, channel requests and responses, and the attested-channel e2e.
+Detail evicted to CHANGELOG `[Unreleased]`.
+
+**Decisions:**
+- Q3 wire format → **CBOR for envelopes/channel records** (ciborium);
+  request/response *payloads* stay JSON until Stage 5 re-evaluates (carry
+  forward, not a blocker).
+- Q4 envelope construction → **RFC 9180 HPKE**
+  (DHKEM(X25519, HKDF-SHA256)/HKDF-SHA256/ChaCha20Poly1305, base mode), no
+  hand-rolled ECIES; official vectors pinned in tests.
+- **Responses use HPKE auth mode**: HPKE-sealing a response *to the client's
+  key* authenticates nobody — any wire observer could forge it. Auth mode
+  makes the enclave prove possession of its *attested* channel key instead,
+  and mixes nonce + request-hash into info for transcript binding. (Found
+  while mapping the channel, not in the original plan.)
+- Envelope owner check: the inner envelope's recipient header is visible by
+  design (the TEE must read it without opening the ciphertext) and is
+  AAD-bound so swaps fail at the client's open.
+- New deps: `x25519-dalek` (+`static_secrets`), `chacha20poly1305`,
+  `zeroize` (AGENTS sanctions zeroize at Stage 3).
+
+**Gotchas added this session:**
+8. ciborium has **no `from_bytes`/`to_bytes`** — only `from_reader`/
+   `into_writer` (hit twice now; see also gotcha7 for the `&[u8]` array trap).
+9. `Hmac::new_from_slice` is ambiguous once `chacha20poly1305::aead::KeyInit`
+   is in scope — use `<Hmac<Sha256> as Mac>::new_from_slice`.
+
+**Next session starts at:** Stage 4 (throttle & blacklist service as an
+attested guest module — rolling window, PoP, audit ring) — its breakdown and
+open questions (rolling-window clock, restart persistence) get evicted from
+`TODO.md` when started. *That stage also has to resolve the clock question
+before its policy code is final.*
+
+---
+
 ## Session 3 — 2026-11-04 — doc set + Stage 2 (attestation mock) [completed → CHANGELOG]
 
 **Outcome:** task pipeline established (AGENTS/TODO/SESSION/CHANGELOG with

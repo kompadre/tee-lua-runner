@@ -1,23 +1,29 @@
 //! TCP transport for `tee-runner serve`.
 //!
-//! Framing: u32 big-endian length followed by that many bytes of JSON.
-//! One request per frame; responses are wrapped as
-//! `{"ok":true,"response":...}` or `{"ok":false,"error":...}` so errors are
-//! visible in-band on a long-lived connection. Malformed frames are transport
-//! errors and close the connection.
+//! Framing: u32 big-endian length followed by that many bytes of payload.
+//!
+//! * **Plain mode** (default): payloads are JSON requests; responses are
+//!   wrapped as `{"ok":true,"response":...}` / `{"ok":false,"error":...}`.
+//! * **Channel mode** (`--channel`): payloads are binary CBOR channel
+//!   messages (tee-crypto) — requests are HPKE-sealed to the enclave's
+//!   channel key and responses are auth-mode sealed back, so the transport
+//!   never sees plaintext requests. A rejected channel message is a
+//!   transport error and closes the connection; once a request is open,
+//!   errors travel in-band as usual.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use anyhow::{Context, Result};
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
+use tee_crypto::ChannelServer;
 
 use runner_core::Runner;
 
 /// Largest accepted frame payload.
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 
-pub fn serve(runner: &mut Runner, listen: &str) -> Result<()> {
+pub fn serve(runner: &mut Runner, listen: &str, channel: Option<ChannelServer>) -> Result<()> {
     let listener = TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
     let addr = listener.local_addr()?;
     println!("listening on {addr}");
@@ -30,7 +36,7 @@ pub fn serve(runner: &mut Runner, listen: &str) -> Result<()> {
                 continue;
             }
         };
-        if let Err(err) = handle_conn(runner, &mut stream) {
+        if let Err(err) = handle_conn(runner, channel.as_ref(), &mut stream) {
             eprintln!("connection closed with error: {err:#}");
         }
         for entry in runner.take_logs() {
@@ -40,21 +46,58 @@ pub fn serve(runner: &mut Runner, listen: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_conn(runner: &mut Runner, stream: &mut TcpStream) -> Result<()> {
+fn handle_conn(
+    runner: &mut Runner,
+    channel: Option<&ChannelServer>,
+    stream: &mut TcpStream,
+) -> Result<()> {
     loop {
-        let request = match read_frame(stream)? {
+        let frame = match read_frame(stream)? {
             Some(frame) => frame,
             None => return Ok(()), // clean EOF
         };
-        let reply = match runner.call_handle(request) {
-            Ok(resp) => serde_json::json!({ "ok": true, "response": resp }),
-            Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+        let reply: Vec<u8> = match channel {
+            Some(server) => reply_channel(runner, server, &frame)?,
+            None => reply_plain(runner, &frame)?,
         };
         write_frame(stream, &reply)?;
     }
 }
 
-fn read_frame(stream: &mut TcpStream) -> Result<Option<Json>> {
+fn reply_envelope(runner: &mut Runner, request: &Json) -> Json {
+    match runner.call_handle(request.clone()) {
+        Ok(resp) => json!({ "ok": true, "response": resp }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    }
+}
+
+fn reply_plain(runner: &mut Runner, frame: &[u8]) -> Result<Vec<u8>> {
+    let request: Json = serde_json::from_slice(frame).context("frame is not valid JSON")?;
+    Ok(serde_json::to_vec(&reply_envelope(runner, &request))?)
+}
+
+fn reply_channel(runner: &mut Runner, server: &ChannelServer, frame: &[u8]) -> Result<Vec<u8>> {
+    let opened = server
+        .open_request(frame)
+        .map_err(|err| anyhow::anyhow!("channel request rejected: {err}"))?;
+    // Once the channel message is open, errors go back in-band through the
+    // authenticated response path (we hold the response keys).
+    let envelope = match serde_json::from_slice::<Json>(&opened.request) {
+        Ok(request) => reply_envelope(runner, &request),
+        Err(err) => json!({ "ok": false, "error": format!("request is not valid JSON: {err}") }),
+    };
+    let response_bytes = serde_json::to_vec(&envelope)?;
+    server
+        .seal_response(
+            &opened.response_pk,
+            &opened.nonce,
+            &opened.request_hash,
+            &response_bytes,
+        )
+        .map_err(|err| anyhow::anyhow!("sealing channel response: {err}"))
+}
+
+fn read_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf) {
         Ok(()) => {}
@@ -67,14 +110,12 @@ fn read_frame(stream: &mut TcpStream) -> Result<Option<Json>> {
     }
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload)?;
-    let value = serde_json::from_slice(&payload).context("frame is not valid JSON")?;
-    Ok(Some(value))
+    Ok(Some(payload))
 }
 
-fn write_frame(stream: &mut TcpStream, value: &Json) -> Result<()> {
-    let payload = serde_json::to_vec(value)?;
+fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
     stream.write_all(&(payload.len() as u32).to_be_bytes())?;
-    stream.write_all(&payload)?;
+    stream.write_all(payload)?;
     stream.flush()?;
     Ok(())
 }

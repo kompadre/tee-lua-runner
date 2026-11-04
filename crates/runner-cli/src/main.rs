@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use runner_core::{measure_module, Limits, Runner};
 use tee_attest::{Attestor, Expectations, MockAttestor, TrustRoot};
+use tee_crypto::ChannelServer;
 
 #[derive(Parser)]
 #[command(
@@ -80,6 +81,11 @@ enum Commands {
         /// (`mock-attest-root: <hex>`) to stderr. For local/QEMU testing only.
         #[arg(long)]
         mock_attest: bool,
+        /// Wrap frames in the end-to-end channel (HPKE to a per-process
+        /// channel key bound into the mock attestation's `public_key`);
+        /// prints `channel-pk: <hex>` to stderr.
+        #[arg(long)]
+        channel: bool,
     },
     /// Verify an attestation document against a trust root (reference client).
     Verify {
@@ -117,7 +123,16 @@ fn main() -> ExitCode {
             fuel,
             mem_mib,
             mock_attest,
-        } => cmd_serve(&module, &listen, cpu_ms, fuel, mem_mib, mock_attest),
+            channel,
+        } => cmd_serve(
+            &module,
+            &listen,
+            cpu_ms,
+            fuel,
+            mem_mib,
+            mock_attest,
+            channel,
+        ),
         Commands::Verify {
             root,
             doc,
@@ -150,9 +165,15 @@ fn read_module(path: &Path) -> Result<Vec<u8>> {
 /// Builds the attestation backend for `--mock-attest`.
 ///
 /// The mock's PCR0 binds the runner binary itself (sha256 of the executable),
-/// so mock documents carry an inspectable, honest-looking PCR set. The trust
-/// root is printed to stderr for relying parties (tests, manual flows).
-fn build_attestor(mock_attest: bool) -> Result<Option<Arc<dyn Attestor>>> {
+/// so mock documents carry an inspectable, honest-looking PCR set. When a
+/// channel key is present (serve `--channel`), its hex public key is bound
+/// into the document's `public_key` field — clients verify the channel key
+/// against the attestation. The trust root is printed to stderr for relying
+/// parties (tests, manual flows).
+fn build_attestor(
+    mock_attest: bool,
+    channel_pk: Option<&str>,
+) -> Result<Option<Arc<dyn Attestor>>> {
     if !mock_attest {
         return Ok(None);
     }
@@ -162,6 +183,10 @@ fn build_attestor(mock_attest: bool) -> Result<Option<Arc<dyn Attestor>>> {
     let mut pcrs = std::collections::BTreeMap::new();
     pcrs.insert("0".to_string(), hex::encode(Sha256::digest(&exe_bytes)));
     let (backend, root) = MockAttestor::generate("tee-runner-mock", pcrs);
+    let backend = match channel_pk {
+        Some(pk) => backend.with_public_key(pk),
+        None => backend,
+    };
     eprintln!("mock-attest-root: {}", root.to_hex());
     Ok(Some(Arc::new(backend)))
 }
@@ -189,7 +214,7 @@ fn cmd_run(
     mock_attest: bool,
 ) -> Result<()> {
     let bytes = read_module(module)?;
-    let attestor = build_attestor(mock_attest)?;
+    let attestor = build_attestor(mock_attest, None)?;
     let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
 
     let raw = read_request(request)?;
@@ -233,12 +258,26 @@ fn cmd_serve(
     fuel: u64,
     mem_mib: usize,
     mock_attest: bool,
+    channel: bool,
 ) -> Result<()> {
     let bytes = read_module(module)?;
-    let attestor = build_attestor(mock_attest)?;
+
+    // Channel key first: the mock attestation binds it as `public_key`.
+    // Stderr print order (documented): root, channel-pk, measurement.
+    let channel = if channel {
+        let (server, pk) = ChannelServer::generate();
+        Some((server, hex::encode(pk)))
+    } else {
+        None
+    };
+    let attestor = build_attestor(mock_attest, channel.as_ref().map(|(_, pk)| pk.as_str()))?;
+    if let Some((_, pk)) = &channel {
+        eprintln!("channel-pk: {pk}");
+    }
+
     let mut runner = Runner::build(&bytes, limits(cpu_ms, fuel, mem_mib), attestor)?;
     eprintln!("module measurement: {}", runner.measurement_hex());
-    server::serve(&mut runner, listen)
+    server::serve(&mut runner, listen, channel.map(|(server, _)| server))
 }
 
 fn cmd_verify(root: &str, doc: &str, nonce: Option<&str>, user_data: Option<&str>) -> Result<()> {

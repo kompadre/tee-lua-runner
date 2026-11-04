@@ -28,7 +28,7 @@ Stage table mirrors [`TODO.md`](TODO.md), which is authoritative.
 | 1 | Runner core (Lua embedding) | done — superseded by 1b |
 | 1b | Wasmtime engine pivot: validation, capability imports, measurement, budgets, guest SDK, host CLI | done |
 | 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | done |
-| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | planned — **next** |
+| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | done |
 | 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | planned |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | planned |
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | planned |
@@ -44,8 +44,10 @@ crates/
   runner-cli     `tee-runner` host binary (measure / run / serve)
   tee-guest      guest SDK (ABI + typed host wrappers) + example services
   tee-attest     Attestor trait + backends (null + mock today; NSM later)
-  tee-crypto     identities, envelopes, channel (Stage 3)
-  tee-proto      wire messages and framing (Stage 3)
+  tee-crypto     identities (Ed25519+X25519, PoP), RFC 9180 HPKE
+                 (base + auth modes, RFC-vector-pinned), blind-gatekeeper
+                 envelopes E_TEE(E_local(…)), client↔enclave channel
+  tee-proto      wire messages and framing (Stage 4)
   client         `tpass` CLI (Stage 5)
   enclave-bin    `tee-enclave` entrypoint (Stage 6)
 scripts/
@@ -106,6 +108,10 @@ echo '{"method":"doc","nonce_hex":"0011"}' | \
   cargo run -p runner-cli -- run scripts/examples/attest.wasm --mock-attest
 # stderr prints "mock-attest-root: <hex>"; verify the returned doc_hex:
 cargo run -p runner-cli -- verify --root <hex> --doc <hex> --nonce 0011
+
+# Stage 3: end-to-end channel — frames are HPKE-sealed to a per-process key
+# printed as "channel-pk: <hex>" and bound into the mock attestation
+cargo run -p runner-cli -- serve scripts/examples/attest.wasm --channel --mock-attest
 ```
 
 `serve` speaks u32-big-endian-length-prefixed JSON frames and wraps responses

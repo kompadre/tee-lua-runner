@@ -17,12 +17,14 @@ into `CHANGELOG.md` and the stage row below gets ticked.
 | 1 | Runner core (Lua embedding) | [x] superseded by 1b |
 | 1b | Wasmtime engine pivot: validation, capability imports, measurement, budgets, guest SDK, host CLI | [x] done |
 | 2 | Attestation: COSE_Sign1 mock backend, client-side verification, trust root, `tee.attest` e2e | [x] done |
-| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [ ] **next** |
-| 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [ ] |
+| 3 | Crypto: local identities (Ed25519+X25519), HPKE envelopes `E_TEE(E_local(…))`, client↔enclave E2E channel | [x] done |
+| 4 | Throttle & blacklist service as an attested guest module (rolling window, PoP, audit ring) | [ ] **next** |
 | 5 | `tpass` client CLI (init/attest/generate/insert/show/list/rm, keystore, zeroize) | [ ] |
 | 6 | QEMU local enclave environment: vsock, NSM stand-in (same NSM API, two backends), rootfs | [ ] |
 | 7 | EIF pipeline: container → `nitro-cli build-enclave` → measurements manifest, CI artifact, EC2 runbook | [ ] |
 | 8 | Hardening backlog: fuzzing, sealed state, quotas, attested logs, benchmarks | [ ] |
+
+<!-- Stage 3 breakdown + its open questions evicted to SESSION.md on start (2026-11-04). -->
 
 ## Open design questions (resolve before/during the named stage)
 
@@ -32,15 +34,10 @@ into `CHANGELOG.md` and the stage row below gets ticked.
    clock jumps. *Thorniest correctness issue in the throttle design.*
 2. **Throttle state across restarts (Stage 4).** In-memory (limits reset) vs
    sealed snapshot vs host-persisted encrypted state.
-3. **Wire format (Stage 3).** CBOR/COSE (aligns with attestation docs) vs
-   JSON during early bring-up. Current RPC is JSON; decide the envelope
-   before `tpass` ships.
-4. **Envelope construction (Stage 3).** RFC 9180 HPKE (recommended: standard
-   vectors) vs hand-rolled ECIES.
-5. **JIT inside Nitro enclaves (Stage 6).** Expect Cranelift's RWX mappings
+3. **JIT inside Nitro enclaves (Stage 6).** Expect Cranelift's RWX mappings
    to work (enclaves are VMs, not SGX), but verify empirically; Wasmtime's
    `pulley` interpreter is the fallback if not.
-6. **Repo name** still says "lua" (README notes the pivot). Rename when
+4. **Repo name** still says "lua" (README notes the pivot). Rename when
    convenient — needs an explicit decision (AGENTS guardrail).
 
 ## Backlog (nice to have)

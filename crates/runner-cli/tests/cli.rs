@@ -1,8 +1,10 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::sync::Once;
 use std::time::Duration;
+
+use tee_crypto::ChannelClient;
 
 /// Builds scripts/examples/*.wasm once per test process.
 fn ensure_examples() {
@@ -262,15 +264,138 @@ fn write_frame(stream: &mut TcpStream, payload: &[u8]) {
 }
 
 fn read_frame(stream: &mut TcpStream) -> Option<serde_json::Value> {
+    let payload = read_raw_frame(stream)?;
+    Some(serde_json::from_slice(&payload).unwrap())
+}
+
+fn read_raw_frame(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf) {
-        Ok(()) => {}
-        Err(_) => return None,
-    }
+    stream.read_exact(&mut len_buf).ok()?;
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).unwrap();
-    Some(serde_json::from_slice(&payload).unwrap())
+    stream.read_exact(&mut payload).ok()?;
+    Some(payload)
+}
+
+/// Full Stage 3 flow: frames wrapped in the end-to-end channel, with the
+/// channel key authenticated *through the mock attestation document*
+/// (`public_key` + measurement + freshness nonce) — i.e. an attacker who can
+/// speak to `serve` but not produce attestations cannot present a convincing
+/// channel endpoint. Proves the sealed request/response path and that
+/// tampering breaks it.
+#[test]
+fn attested_channel_end_to_end() {
+    let mut child = bin()
+        .args([
+            "serve",
+            &example("attest.wasm"),
+            "--channel",
+            "--mock-attest",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Documented stderr order: mock-attest-root, channel-pk, measurement.
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    let root_hex = line
+        .strip_prefix("mock-attest-root: ")
+        .expect("root line")
+        .trim()
+        .to_string();
+    line.clear();
+    stderr.read_line(&mut line).unwrap();
+    let channel_hex = line
+        .strip_prefix("channel-pk: ")
+        .expect("channel line")
+        .trim()
+        .to_string();
+    line.clear();
+    stderr.read_line(&mut line).unwrap();
+    assert!(
+        line.starts_with("module measurement: "),
+        "measurement line, got: {line}"
+    );
+
+    let mut line = String::new();
+    {
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut line).unwrap();
+    }
+    let port: u16 = line
+        .trim()
+        .rsplit(':')
+        .next()
+        .expect("listening line")
+        .parse()
+        .unwrap();
+
+    let server_pk: [u8; 32] = hex::decode(&channel_hex)
+        .unwrap()
+        .try_into()
+        .expect("32-byte channel key");
+    let client = ChannelClient::new(server_pk);
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    // Sealed request through the channel.
+    let (msg, pending) = client
+        .seal_request(br#"{"method":"doc","nonce_hex":"feedbeef"}"#)
+        .unwrap();
+    write_frame(&mut stream, &msg);
+    let response = read_raw_frame(&mut stream).expect("response frame");
+    let envelope_bytes = client.open_response(&pending, &response).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&envelope_bytes).unwrap();
+    assert_eq!(envelope["ok"], serde_json::json!(true));
+    let doc = hex::decode(envelope["response"]["doc_hex"].as_str().unwrap()).unwrap();
+
+    // The attestation binds: this channel key (public_key), this module
+    // measurement (user_data), and this freshness nonce.
+    let module_bytes = std::fs::read(example("attest.wasm")).unwrap();
+    let (_, measurement) = runner_core::measure_module(&module_bytes).unwrap();
+    let root = tee_attest::TrustRoot::from_hex(&root_hex).unwrap();
+    let payload = tee_attest::verify(
+        &root,
+        &doc,
+        &tee_attest::Expectations::new()
+            .with_nonce(&hex::decode("feedbeef").unwrap())
+            .with_user_data(&measurement),
+    )
+    .expect("attestation must verify");
+    assert_eq!(
+        payload.public_key.as_deref(),
+        Some(channel_hex.as_str()),
+        "attestation must bind the channel key"
+    );
+
+    // A tampered response frame is rejected by the client.
+    let (msg2, pending2) = client
+        .seal_request(br#"{"method":"doc","nonce_hex":"feedbeef"}"#)
+        .unwrap();
+    write_frame(&mut stream, &msg2);
+    let mut response2 = read_raw_frame(&mut stream).expect("response frame");
+    let middle = response2.len() / 2;
+    response2[middle] ^= 0xff;
+    assert!(client.open_response(&pending2, &response2).is_err());
+
+    // A tampered request frame never opens on the server side (connection
+    // closes without a reply).
+    let mut bad = msg.clone();
+    let middle = bad.len() / 2;
+    bad[middle] ^= 0xff;
+    write_frame(&mut stream, &bad);
+    assert!(read_raw_frame(&mut stream).is_none());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 #[test]

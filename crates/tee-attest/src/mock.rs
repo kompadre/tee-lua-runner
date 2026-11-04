@@ -25,6 +25,7 @@ pub struct MockAttestor {
     signing_key: SigningKey,
     module_id: String,
     pcrs: BTreeMap<String, String>,
+    public_key: Option<String>,
 }
 
 // Redacted: must not expose key material through Debug.
@@ -61,9 +62,18 @@ impl MockAttestor {
                 signing_key,
                 module_id: module_id.into(),
                 pcrs,
+                public_key: None,
             },
             trust_root,
         )
+    }
+
+    /// Binds an application public key (hex) into every document's
+    /// `public_key` field — for Stage 3: the enclave's channel key, so
+    /// clients can authenticate the channel against the attestation.
+    pub fn with_public_key(mut self, public_key_hex: impl Into<String>) -> Self {
+        self.public_key = Some(public_key_hex.into());
+        self
     }
 }
 
@@ -80,7 +90,7 @@ impl crate::Attestor for MockAttestor {
             timestamp,
             nonce: (!nonce.is_empty()).then(|| hex::encode(nonce)),
             user_data: (!user_data.is_empty()).then(|| hex::encode(user_data)),
-            public_key: None,
+            public_key: self.public_key.clone(),
             algorithm: MOCK_ALGORITHM.to_string(),
         };
         let mut payload_bytes = Vec::new();

@@ -7,6 +7,34 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **Crypto (Stage 3, `tee-crypto`)**:
+  - `LocalIdentity` / `PublicIdentity` — Ed25519 (identity + domain-separated
+    proof-of-possession) with X25519 (envelope recipient), seed-based,
+    zeroize-on-drop, `key_id()` for throttle/audit binding.
+  - **RFC 9180 HPKE**, suite DHKEM(X25519, HKDF-SHA256)/HKDF-SHA256/
+    ChaCha20Poly1305: base mode (envelopes, channel requests) and auth mode
+    (channel responses), pinned against the official Appendix A.2/A.2.3 test
+    vectors (key derivation, encapsulation, key schedule, nonces, ciphertexts).
+  - **Blind-gatekeeper envelopes**: `seal_secret` = `E_TEE(E_local(secret))`
+    with `tee_unwrap` (outer open + inner-recipient owner check, plaintext
+    never in the TEE), AAD-bound recipient/TEE headers, self-describing inner
+    layout. New deps: `x25519-dalek`, `chacha20poly1305`, `zeroize`.
+  - **E2E channel** (one-shot request/response, CBOR records): requests
+    HPKE-sealed to the enclave's channel key; responses **HPKE auth mode** so
+    the enclave proves possession of its *attested* key (plain
+    encrypt-to-public-key would let any wire observer forge responses);
+    nonce echo + request-hash transcript binding; per-request client response
+    keys.
+- `tee-attest`: `MockAttestor::with_public_key` — binds an application key
+  (the channel key) into the attestation payload's `public_key` field.
+- `tee-runner serve --channel`: channel-wrapped frames (binary), prints
+  `channel-pk: <hex>`; works with `--mock-attest` for the attested-channel
+  flow (stderr order: root, channel-pk, measurement).
+- Tests (68 workspace + 2 guest): RFC vectors, envelope owner-binding +
+  exhaustive tamper scan, channel server-auth forgery rejection + exhaustive
+  tamper scans both directions, PoP roundtrip/domain binding, and the CLI
+  attested-channel e2e (channel key verified against the attestation document).
+
 - **Attestation (Stage 2)**: `tee-attest` ships a COSE_Sign1 (RFC 9814) mock
   attestation backend — `MockAttestor` (Ed25519 test root, `generate` /
   `from_seed`), a Nitro-mirroring payload schema (`module_id`, `digest`,
@@ -61,6 +89,10 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Changed
 
+- **Resolved Stage 3 open questions**: wire format → CBOR for
+  envelopes/channel records (request payloads stay JSON until Stage 5
+  re-evaluates); envelope construction → RFC 9180 HPKE with official vectors
+  pinned (no hand-rolled ECIES). *(Stage 3)*
 - **Script engine pivoted from Lua 5.4 to WebAssembly (Wasmtime 50)** after a
   measured evaluation: engine-enforced (uncatchable) limits replace
   hand-rolled hook enforcement, the hashed import section *is* the capability
