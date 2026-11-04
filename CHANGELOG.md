@@ -7,6 +7,15 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- Task runner: **`justfile` as a stable command facade** — recipes `gates`
+  (all five quality gates, including the new `svc-throttle` gate),
+  `guest-tests`, `throttle-tests`, `examples`, `ci`, and
+  `measure`/`run`/`serve` with pass-through flags. Docs and instructions
+  reference recipe names instead of command lines (context economy); CI keeps
+  running the commands verbatim with sync comments in both files. `xtask`
+  deliberately deferred to Stage 7 (task bodies will need real Rust logic —
+  release manifests, PCR/measurement computation reusing runner-core); the
+  facade means landing it later changes no docs or callers.
 - **Throttle service (Stage 4)** — the reference workload as an attested
   guest module (`svc-throttle`, artifact `throttle.wasm`, 199 KB, manifest
   `log,state,clock,crypto,gate`):

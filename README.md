@@ -95,6 +95,12 @@ extern "C" { #[link_name = "get"] fn state_get_raw(ptr: i32, len: i32) -> i64; }
 
 ## Development
 
+Quick recipes via [`just`](https://just.systems) (`just --list` shows them
+all): `just gates` runs the five quality gates, `just examples` builds every
+guest artifact, `just ci` does both, `just measure <module>` prints manifest
++ measurement, `just run`/`just serve` wrap the runner with pass-through
+flags. Raw commands below.
+
 ```sh
 cargo test --workspace                          # all runner + CLI tests
 cargo test -p tee-guest --features svc-counter  # native guest service tests

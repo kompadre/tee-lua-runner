@@ -57,12 +57,22 @@ to CHANGELOG `[Unreleased]`.
     assuming fresh state.
 
 **Working state / pending user action:**
-- **AGENTS.md gates list needs an amendment** (Instruction 0: only the user
-  prescribes AGENTS text): CI now also runs
-  `cargo test -p tee-guest --features svc-throttle`. Proposed literal
-  addition under the gates block: `cargo test -p tee-guest --features
-  svc-throttle   # gate 5 (throttle service)`. Not applied — waiting for
-  explicit user prescription.
+- ~~AGENTS gates list amendment~~ — **resolved**: user prescribed the literal
+  gate-5 line (`cargo test -p tee-guest --features svc-throttle    # gate 5
+  (throttle service)`) and it was applied verbatim — the first exercised use
+  of Instruction 0 (prescription honored exactly, nothing else touched).
+- **Tooling decision (user prompt: just + xtask consideration):**
+  - **Adopted `just`** as the stable facade (`justfile`: `gates` = the five
+    gates, `examples`, `ci`, `measure`/`run`/`serve`). Docs/instructions can
+    now say `just gates` instead of listing commands — the context-economy
+    goal. CI mirrors the commands verbatim (sync comments both ways; CI stays
+    dependency-free). Installed locally via `cargo install just --locked`.
+  - **`xtask` deferred to Stage 7** with a concrete trigger: when a task
+    body needs real Rust logic (release manifests, PCR/measurement
+    computation — reusing `runner-core::measure_module`), recipes switch to
+    `cargo run -p xtask -- <name>` **without changing any caller, doc, or CI
+    line** — that facade property is why xtask-now would be premature
+    scaffolding and just-now is not.
 
 **Next session starts at:** Stage 5 (`tpass` client CLI: init/attest/
 generate/insert/show/list/rm, keystore + zeroize) — breakdown and open

@@ -74,6 +74,7 @@ cargo fmt --all -- --check                       # gate 1
 cargo clippy --workspace --all-targets -- -D warnings   # gate 2
 cargo test --workspace                            # gate 3
 cargo test -p tee-guest --features svc-counter    # gate 4 (guest services)
+cargo test -p tee-guest --features svc-throttle    # gate 5 (throttle service)
 ./scripts/build-guest-examples.sh                 # build example *.wasm
 cargo run -p runner-cli -- measure scripts/examples/counter.wasm
 ```

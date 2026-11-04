@@ -1,3 +1,4 @@
+# Commands mirror the `just` recipes (see justfile `gates`) — keep in sync.
 name: CI
 
 on:
