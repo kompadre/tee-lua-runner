@@ -79,6 +79,13 @@ extern "C" { #[link_name = "get"] fn state_get_raw(ptr: i32, len: i32) -> i64; }
   artifact bytes depend on guest source lines — build guest sources from
   tagged commits when pinning measurements (release manifests, Stage 7).
 
+## Documentation
+
+- [`AGENTS.md`](AGENTS.md) — how to work here: conventions, commands, architecture invariants
+- [`TODO.md`](TODO.md) — task board: stages, open design questions, backlog
+- [`SESSION.md`](SESSION.md) — rolling handoff log: last session's outcome, gotchas, next step
+- [`CHANGELOG.md`](CHANGELOG.md) — user-visible history
+
 ## Development
 
 ```sh
