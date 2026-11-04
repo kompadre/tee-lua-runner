@@ -2,6 +2,8 @@
 name = "tee-guest"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [lib]
 # cdylib produces the .wasm artifact; rlib allows native builds/tests.

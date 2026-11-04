@@ -151,3 +151,25 @@ builds compile Wasmtime without `wat`: only binary wasm is accepted.
 The toolchain (and the `wasm32-unknown-unknown` target) is pinned in
 `rust-toolchain.toml` — reproducible builds matter for stable Nitro PCR values
 and reproducible guest artifacts.
+
+## License
+
+[MIT](LICENSE) — © 2026 Alexey S. Kompaniets <kompadre@gmail.com>.
+
+Third-party materials and dependencies keep their own licenses; none are
+vendored into this repository:
+
+- **Test fixtures** (`crates/tee-attest/tests/fixtures/`): a captured Nitro
+  attestation document from AWS's MIT-licensed
+  [nitro-attest](https://github.com/aws-nitro-enclaves/nitro-attest)
+  repository, and the AWS Nitro Enclaves Root G1 certificate as published by
+  AWS for relying parties — provenance in that directory's README.
+- **Crates.io dependencies** (Wasmtime, ed25519-dalek/x25519-dalek,
+  chacha20poly1305, argon2, ciborium, x509-parser, p384,
+  aws-nitro-enclaves-nsm-api, vsock, clap, …) are covered by their own
+  licenses (Apache-2.0/MIT/BSD); see `Cargo.lock` / each crate's metadata.
+- **Build/run-time tooling** (Docker's `busybox` image, `nitro-cli`) is used
+  but not redistributed here; `nitro-cli` is Apache-2.0. Note that artifacts
+  *built* by `deploy/` (the Nitro EIF and the QEMU initramfs) embed BusyBox
+  (GPL-2.0) — complying with BusyBox's license is on whoever distributes
+  those artifacts.

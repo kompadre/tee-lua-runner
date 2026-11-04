@@ -7,6 +7,12 @@ The project has not had a release yet; everything lives under `[Unreleased]`.
 
 ### Added
 
+- **Licensing**: MIT license added (`LICENSE`), © 2026 Alexey S. Kompaniets
+  <kompadre@gmail.com>; workspace crates declare `license = "MIT"` +
+  authors. README gained a License section crediting third-party materials
+  (test-fixture provenance from AWS's MIT `nitro-attest`, the published
+  AWS Nitro root certificate, per-crate dependency licenses, and BusyBox
+  GPL-2.0 obligations for built deploy artifacts).
 - **EIF pipeline (Stage 7)** — container → `nitro-cli build-enclave` →
   measurements manifest → CI artifact → EC2 runbook, validated locally end
   to end (EC2 execution is documented, not yet run):
