@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.swp
 .DS_Store
+# Guest example artifacts (built by scripts/build-guest-examples.sh)
+/scripts/examples/*.wasm

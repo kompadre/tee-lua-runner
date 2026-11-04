@@ -6,6 +6,7 @@ members = [
     "crates/tee-attest",
     "crates/runner-core",
     "crates/runner-cli",
+    "crates/tee-guest",
     "crates/enclave-bin",
     "crates/client",
 ]
@@ -24,6 +25,7 @@ hmac = "0.12"
 hkdf = "0.12"
 rand = "0.8"
 hex = "0.4"
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime"] }
 
 # Deterministic release builds for stable EIF measurements.
 [profile.release]

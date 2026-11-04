@@ -1,19 +1,84 @@
-use std::rc::Rc;
+//! Integration tests against hand-written wasm fixtures (wat).
+
 use std::time::{Duration, Instant};
 
 use runner_core::{
-    parse_manifest, script_measurement, Capability, Limit, Limits, Manifest, Runner, RunnerError,
+    measure_module, script_measurement, Capability, Limit, Limits, Manifest, Runner, RunnerError,
 };
 use serde_json::json;
-use tee_attest::{AttestError, Attestor};
+
+/// A minimal echo guest: `handle` wraps the request as
+/// `{"ok":true,"response":<request>}` (prefix is 22 bytes, overhead 23).
+const ECHO: &str = r#"(module
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{\"ok\":true,\"response\":")
+  (global $bump (mut i32) (i32.const 64))
+  (func (export "alloc") (param $n i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get $n)))
+    (local.get $p))
+  (func (export "handle") (param $in i32) (param $n i32) (result i64)
+    (local $out i32)
+    (local.set $out (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (i32.add (local.get $n) (i32.const 23))))
+    (memory.copy (local.get $out) (i32.const 0) (i32.const 22))
+    (memory.copy (i32.add (local.get $out) (i32.const 22)) (local.get $in) (local.get $n))
+    (i32.store8
+      (i32.add (i32.add (local.get $out) (i32.const 22)) (local.get $n))
+      (i32.const 125))
+    (i64.or
+      (i64.extend_i32_u (local.get $out))
+      (i64.shl
+        (i64.extend_i32_u (i32.add (local.get $n) (i32.const 23)))
+        (i64.const 32)))))
+"#;
+
+/// Valid exports, but `handle` never returns.
+const LOOPY: &str = r#"(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 4096))
+  (func (export "handle") (param i32 i32) (result i64)
+    (loop $l (br $l))
+    (i64.const 0)))
+"#;
+
+/// Loops forever during instantiation (start section).
+const LOOPY_START: &str = r#"(module
+  (memory (export "memory") 1)
+  (func $init (loop $l (br $l)))
+  (start $init)
+  (func (export "alloc") (param i32) (result i32) (i32.const 4096))
+  (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+
+const TRAPPIER: &str = r#"(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 4096))
+  (func (export "handle") (param i32 i32) (result i64) (unreachable)))
+"#;
+
+const DUMMY_EXPORTS: &str = r#"
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 4096))
+  (func (export "handle") (param i32 i32) (result i64) (i64.const 0))"#;
 
 fn limits() -> Limits {
     Limits::default()
 }
 
-fn tight_cpu(ms: u64) -> Limits {
+fn tight_fuel() -> Limits {
     Limits {
-        max_cpu: Duration::from_millis(ms),
+        max_fuel: 100_000,
+        max_cpu: Duration::from_secs(30),
+        ..Limits::default()
+    }
+}
+
+fn tight_cpu() -> Limits {
+    Limits {
+        max_cpu: Duration::from_millis(200),
+        max_fuel: u64::MAX,
         ..Limits::default()
     }
 }
@@ -22,348 +87,208 @@ fn tight_cpu(ms: u64) -> Limits {
 
 #[test]
 fn measurement_is_stable_hex() {
-    let src = "function handle(req) return req end";
-    let a = script_measurement(src, &Manifest::default());
-    let b = script_measurement(src, &Manifest::default());
+    let a = measure_module(ECHO.as_bytes()).unwrap();
+    let b = measure_module(ECHO.as_bytes()).unwrap();
     assert_eq!(a, b);
-    assert_eq!(runner_core::to_hex(&a).len(), 64);
+    assert_eq!(runner_core::to_hex(&a.1).len(), 64);
 }
 
 #[test]
-fn measurement_changes_with_script_bytes() {
-    let m1 = script_measurement("function handle(req) return req end", &Manifest::default());
-    let m2 = script_measurement("function handle(req) return req end ", &Manifest::default());
-    assert_ne!(m1, m2);
+fn measurement_changes_with_module_bytes() {
+    let a = script_measurement(b"(module)", &Manifest::default());
+    let b = script_measurement(b"(module) ", &Manifest::default());
+    assert_ne!(a, b);
 }
 
 #[test]
 fn measurement_binds_capability_set() {
-    let src = "function handle(req) return req end";
-    let none = script_measurement(src, &Manifest::default());
-    let log = script_measurement(src, &Manifest::new([Capability::Log]));
+    let bytes = b"module bytes";
+    let none = script_measurement(bytes, &Manifest::default());
+    let log = script_measurement(bytes, &Manifest::new([Capability::Log]));
     assert_ne!(none, log);
 
-    // Manifest is canonicalized: set order does not matter.
-    let a = script_measurement(src, &Manifest::new([Capability::Log, Capability::State]));
-    let b = script_measurement(src, &Manifest::new([Capability::State, Capability::Log]));
+    // Canonical: set order does not matter.
+    let a = script_measurement(bytes, &Manifest::new([Capability::Log, Capability::State]));
+    let b = script_measurement(bytes, &Manifest::new([Capability::State, Capability::Log]));
     assert_eq!(a, b);
 }
 
 #[test]
 fn runner_measurement_matches_helper() {
-    let src = "-- @capability log\nfunction handle(req) return req end\n";
-    let runner = Runner::new(src, limits()).unwrap();
-    let manifest = parse_manifest(src).unwrap();
-    assert_eq!(runner.measurement(), script_measurement(src, &manifest));
+    let runner = Runner::new(ECHO.as_bytes(), limits()).unwrap();
+    let (manifest, measurement) = measure_module(ECHO.as_bytes()).unwrap();
+    assert_eq!(runner.manifest(), &manifest);
+    assert_eq!(runner.measurement(), measurement);
 }
 
-// -------------------------------------------------------------------- sandbox
+// -------------------------------------------------------- module validation
 
 #[test]
-fn sandbox_blocks_dangerous_globals() {
-    let src = r#"
-        function handle(req)
-            return {
-                os = os == nil,
-                io = io == nil,
-                debug = debug == nil,
-                require = require == nil,
-                package = package == nil,
-                load = load == nil,
-                dofile = dofile == nil,
-                loadfile = loadfile == nil,
-                print = print == nil,
-                warn = warn == nil,
-                collectgarbage = collectgarbage == nil,
-                dump = string.dump == nil,
-                -- the safe subset must be available
-                base_ok = type(type) == "function" and type(pcall) == "function"
-                    and type(error) == "function" and type(string.format) == "function",
-            }
-        end
-    "#;
-    let mut runner = Runner::new(src, limits()).unwrap();
-    let resp = runner.call_handle(json!({})).unwrap();
-    let obj = resp.as_object().unwrap();
-    for (key, val) in obj {
-        if key == "base_ok" {
-            assert_eq!(val, &json!(true), "safe base functions must exist");
-        } else {
-            assert_eq!(val, &json!(true), "{key} must be stripped from the sandbox");
-        }
-    }
+fn required_exports_are_enforced() {
+    let err = Runner::new(b"(module (func))", limits()).unwrap_err();
+    assert!(matches!(err, RunnerError::MissingExport(_)));
+
+    let missing_handle = r#"(module (memory (export "memory") 1)
+            (func (export "alloc") (param i32) (result i32) (i32.const 4096)))"#;
+    let err = Runner::new(missing_handle.as_bytes(), limits()).unwrap_err();
+    assert!(matches!(err, RunnerError::MissingExport(name) if name == "handle"));
 }
 
 #[test]
-fn capability_is_gated() {
-    // Without the manifest line, `clock` is not installed at all.
-    let src = "function handle(req) return { t = clock.unix_seconds() } end";
-    let mut runner = Runner::new(src, limits()).unwrap();
-    let err = runner.call_handle(json!({})).unwrap_err();
+fn unknown_import_modules_are_rejected() {
+    let wat = format!(
+        r#"(module
+            (import "wasi_snapshot_preview1" "fd_write"
+                (func (param i32 i32) (result i64)))
+            {DUMMY_EXPORTS})"#
+    );
+    let err = Runner::new(wat.as_bytes(), limits()).unwrap_err();
     match err {
-        RunnerError::Script(msg) => assert!(msg.contains("clock"), "unexpected error: {msg}"),
-        other => panic!("expected script error, got {other:?}"),
+        RunnerError::InvalidManifest(msg) => assert!(msg.contains("wasi_snapshot_preview1")),
+        other => panic!("expected invalid manifest, got {other:?}"),
     }
 }
 
 #[test]
-fn capability_granted_works() {
-    let src = "-- @capability clock\nfunction handle(req) return { t = clock.unix_seconds() } end";
-    let mut runner = Runner::new(src, limits()).unwrap();
-    let resp = runner.call_handle(json!({})).unwrap();
-    assert!(resp["t"].as_i64().unwrap() > 1_600_000_000);
+fn unknown_import_fields_are_rejected() {
+    let wat = format!(
+        r#"(module
+            (import "state" "gett" (func (param i32 i32) (result i64)))
+            {DUMMY_EXPORTS})"#
+    );
+    let err = Runner::new(wat.as_bytes(), limits()).unwrap_err();
+    match err {
+        RunnerError::InvalidManifest(msg) => assert!(msg.contains("state.gett")),
+        other => panic!("expected invalid manifest, got {other:?}"),
+    }
 }
 
 #[test]
-fn manifest_errors_are_hard() {
-    assert!(matches!(
-        parse_manifest("-- @capability nope\nfunction handle() end"),
-        Err(RunnerError::InvalidManifest(_))
-    ));
-    assert!(matches!(
-        parse_manifest("function handle() end\n-- @capability log\n"),
-        Err(RunnerError::InvalidManifest(_))
-    ));
-    assert!(matches!(
-        parse_manifest("-- @capability\nfunction handle() end"),
-        Err(RunnerError::InvalidManifest(_))
-    ));
+fn wrong_host_signatures_are_rejected() {
+    let wat = format!(
+        r#"(module
+            (import "clock" "unix_seconds" (func (param i32) (result i64)))
+            {DUMMY_EXPORTS})"#
+    );
+    let err = Runner::new(wat.as_bytes(), limits()).unwrap_err();
+    match err {
+        RunnerError::InvalidManifest(msg) => assert!(msg.contains("wrong signature")),
+        other => panic!("expected invalid manifest, got {other:?}"),
+    }
 }
 
-// ----------------------------------------------------------------------- rpc
+#[test]
+fn manifest_is_derived_from_imports() {
+    let wat = format!(
+        r#"(module
+            (import "state" "get" (func (param i32 i32) (result i64)))
+            (import "log" "log" (func (param i32 i32) (result i64)))
+            {DUMMY_EXPORTS})"#
+    );
+    let runner = Runner::new(wat.as_bytes(), limits()).unwrap();
+    let caps: Vec<Capability> = runner.manifest().iter().collect();
+    assert_eq!(caps, vec![Capability::Log, Capability::State]);
+    assert!(!runner.manifest().contains(Capability::Clock));
+}
+
+// --------------------------------------------------------------------- rpc
 
 #[test]
-fn json_roundtrip() {
-    let src = "function handle(req) return req end";
-    let mut runner = Runner::new(src, limits()).unwrap();
+fn json_roundtrip_via_abi() {
+    let mut runner = Runner::new(ECHO.as_bytes(), limits()).unwrap();
     let req = json!({"a": [1, 2, 3], "b": {"c": "d"}, "s": "hello"});
     assert_eq!(runner.call_handle(req.clone()).unwrap(), req);
 }
 
 #[test]
-fn no_handler_is_reported() {
-    let mut runner = Runner::new("local x = 1", limits()).unwrap();
-    assert!(matches!(
-        runner.call_handle(json!({})),
-        Err(RunnerError::NoHandler)
-    ));
-}
-
-#[test]
-fn script_error_is_reported() {
-    let src = r#"function handle(req) error("boom") end"#;
-    let mut runner = Runner::new(src, limits()).unwrap();
+fn guest_error_envelope_is_reported() {
+    let mut runner = Runner::new(TRAPPIER.as_bytes(), limits()).unwrap();
     match runner.call_handle(json!({})) {
-        Err(RunnerError::Script(msg)) => assert!(msg.contains("boom"), "unexpected: {msg}"),
-        other => panic!("expected script error, got {other:?}"),
-    }
-}
-
-// ------------------------------------------------------------------ state/log
-
-#[test]
-fn state_roundtrip() {
-    let src = r#"
-        -- @capability state
-        function handle(req)
-            if req.method == "set" then
-                state.set(req.key, req.value)
-                return { ok = true }
-            elseif req.method == "get" then
-                return { value = state.get(req.key) }
-            elseif req.method == "keys" then
-                return { keys = state.keys() }
-            end
-            error("bad method")
-        end
-    "#;
-    let mut runner = Runner::new(src, limits()).unwrap();
-    runner
-        .call_handle(json!({"method": "set", "key": "k1", "value": {"n": 42}}))
-        .unwrap();
-    runner
-        .call_handle(json!({"method": "set", "key": "k2", "value": "v"}))
-        .unwrap();
-    let resp = runner
-        .call_handle(json!({"method": "get", "key": "k1"}))
-        .unwrap();
-    assert_eq!(resp["value"], json!({"n": 42}));
-    let resp = runner.call_handle(json!({"method": "keys"})).unwrap();
-    assert_eq!(resp["keys"], json!(["k1", "k2"]));
-}
-
-#[test]
-fn logs_are_captured_and_levels_validated() {
-    let src = r#"
-        -- @capability log
-        function handle(req)
-            log("info", "hello")
-            log("nonsense", "bad level")
-            return {}
-        end
-    "#;
-    let mut runner = Runner::new(src, limits()).unwrap();
-    assert!(matches!(
-        runner.call_handle(json!({})),
-        Err(RunnerError::Script(_))
-    ));
-    let logs = runner.take_logs();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].level, "info");
-    assert_eq!(logs[0].message, "hello");
-}
-
-// ------------------------------------------------------------------- attest
-
-struct FakeAttestor;
-
-impl Attestor for FakeAttestor {
-    fn attest(&self, nonce: &[u8], user_data: &[u8]) -> Result<Vec<u8>, AttestError> {
-        let mut doc = b"FAKE-DOC".to_vec();
-        doc.extend_from_slice(nonce);
-        doc.extend_from_slice(user_data);
-        Ok(doc)
-    }
-}
-
-#[test]
-fn attest_without_backend_errors() {
-    let src = "-- @capability attest\nfunction handle(req) return { doc = tee.attest('n') } end";
-    let mut runner = Runner::new(src, limits()).unwrap();
-    match runner.call_handle(json!({})) {
-        Err(RunnerError::Script(msg)) => {
-            assert!(msg.contains("no attestation backend"), "unexpected: {msg}")
-        }
-        other => panic!("expected script error, got {other:?}"),
-    }
-}
-
-#[test]
-fn attest_binds_measurement_and_nonce() {
-    let src =
-        "-- @capability attest\nfunction handle(req) return { doc = tee.attest(req.nonce) } end";
-    let attestor: Rc<dyn Attestor> = Rc::new(FakeAttestor);
-    let mut runner = Runner::build(src, limits(), Some(attestor)).unwrap();
-    let resp = runner.call_handle(json!({"nonce": "abc"})).unwrap();
-
-    let mut expected = b"FAKE-DOC".to_vec();
-    expected.extend_from_slice(b"abc");
-    expected.extend_from_slice(&runner.measurement());
-    assert_eq!(resp["doc"], json!(runner_core::to_hex(&expected)));
-}
-
-// ------------------------------------------------------------------- limits
-
-#[test]
-fn cpu_limit_breaks_infinite_loop() {
-    let src = "function handle(req) while true do end end";
-    let mut runner = Runner::new(src, tight_cpu(100)).unwrap();
-    let started = Instant::now();
-    let err = runner.call_handle(json!({})).unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "limit did not stop the script"
-    );
-    assert!(matches!(err, RunnerError::LimitExceeded(Limit::Cpu(_))));
-}
-
-#[test]
-fn cpu_limit_cannot_be_swallowed_by_pcall() {
-    // The script catches the limit error and keeps spinning; the re-armed
-    // stride-1 hook must make this terminate anyway.
-    let src = r#"
-        function handle(req)
-            while true do
-                pcall(function() while true do end end)
-            end
-        end
-    "#;
-    let mut runner = Runner::new(src, tight_cpu(100)).unwrap();
-    let started = Instant::now();
-    let err = runner.call_handle(json!({})).unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "pcall swallowed the limit error and the runner hung"
-    );
-    assert!(matches!(err, RunnerError::LimitExceeded(_)));
-}
-
-#[test]
-fn limit_applies_at_load_time() {
-    let src = "while true do end";
-    let started = Instant::now();
-    let err = Runner::new(src, tight_cpu(100)).unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "load-time loop was not stopped"
-    );
-    assert!(matches!(err, RunnerError::LimitExceeded(_)));
-}
-
-#[test]
-fn memory_limit_trips() {
-    let src = r#"
-        function handle(req)
-            local t = {}
-            local i = 1
-            while true do
-                t[i] = "payload" .. i
-                i = i + 1
-            end
-        end
-    "#;
-    let limits = Limits {
-        max_cpu: Duration::from_secs(10),
-        max_memory_bytes: 256 * 1024,
-        ..Limits::default()
-    };
-    let mut runner = Runner::new(src, limits).unwrap();
-    let err = runner.call_handle(json!({})).unwrap_err();
-    assert!(matches!(
-        err,
-        RunnerError::LimitExceeded(Limit::Memory { .. })
-    ));
-}
-
-#[test]
-fn string_rep_is_bounded() {
-    let src = r#"
-        function handle(req)
-            local s = ("x"):rep(2 * 1024 * 1024)
-            return { n = #s }
-        end
-    "#;
-    let limits = Limits {
-        max_memory_bytes: 1024 * 1024,
-        ..Limits::default()
-    };
-    let mut runner = Runner::new(src, limits).unwrap();
-    match runner.call_handle(json!({})) {
-        Err(RunnerError::Script(msg)) => {
-            assert!(msg.contains("string.rep"), "unexpected: {msg}")
-        }
+        Err(RunnerError::Script(msg)) => assert!(msg.contains("trapped"), "unexpected: {msg}"),
         other => panic!("expected script error, got {other:?}"),
     }
 }
 
 #[test]
 fn request_and_response_sizes_are_capped() {
-    let src = "function handle(req) return req end";
-    let limits = Limits {
-        max_request_bytes: 16,
-        max_response_bytes: 16,
-        ..Limits::default()
-    };
-    let mut runner = Runner::new(src, limits.clone()).unwrap();
+    let mut runner = Runner::new(
+        ECHO.as_bytes(),
+        Limits {
+            max_request_bytes: 32,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
     assert!(matches!(
-        runner.call_handle(json!({"key": "value that is long"})),
+        runner.call_handle(
+            json!({"key": "value that is definitely long enough to exceed thirty-two bytes"})
+        ),
         Err(RunnerError::RequestTooLarge { .. })
     ));
 
-    let src = "function handle(req) return { big = ('x'):rep(1000) } end";
-    let mut runner = Runner::new(src, limits.clone()).unwrap();
+    let mut runner = Runner::new(
+        ECHO.as_bytes(),
+        Limits {
+            max_response_bytes: 64,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let req = json!({"padding": "0123456789012345678901234567890123456789"});
     assert!(matches!(
-        runner.call_handle(json!({})),
+        runner.call_handle(req),
         Err(RunnerError::ResponseTooLarge { .. })
+    ));
+}
+
+// ------------------------------------------------------------------- limits
+
+#[test]
+fn fuel_limit_breaks_infinite_loop() {
+    let mut runner = Runner::new(LOOPY.as_bytes(), tight_fuel()).unwrap();
+    let started = Instant::now();
+    let err = runner.call_handle(json!({})).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "fuel limit did not stop the guest"
+    );
+    assert!(matches!(err, RunnerError::LimitExceeded(Limit::Fuel(_))));
+}
+
+#[test]
+fn wall_clock_limit_breaks_infinite_loop() {
+    let mut runner = Runner::new(LOOPY.as_bytes(), tight_cpu()).unwrap();
+    let started = Instant::now();
+    let err = runner.call_handle(json!({})).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "epoch interruption did not stop the guest"
+    );
+    assert!(matches!(err, RunnerError::LimitExceeded(Limit::Cpu(_))));
+}
+
+#[test]
+fn limits_apply_at_instantiation() {
+    let mut runner = Runner::new(LOOPY_START.as_bytes(), tight_fuel()).unwrap();
+    let started = Instant::now();
+    let err = runner.call_handle(json!({})).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "start-section loop was not stopped"
+    );
+    assert!(matches!(err, RunnerError::LimitExceeded(_)));
+}
+
+#[test]
+fn memory_floor_rejected_at_build() {
+    // 1024 pages = 64 MiB, above the default 32 MiB cap.
+    let wat = r#"(module
+        (memory (export "memory") 1024)
+        (func (export "alloc") (param i32) (result i32) (i32.const 4096))
+        (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))"#;
+    let err = Runner::new(wat.as_bytes(), limits()).unwrap_err();
+    assert!(matches!(
+        err,
+        RunnerError::LimitExceeded(Limit::Memory { .. })
     ));
 }

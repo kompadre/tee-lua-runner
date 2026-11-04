@@ -1,9 +1,31 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::time::Duration;
 
+/// Builds scripts/examples/*.wasm once per test process.
+fn ensure_examples() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let script = format!(
+            "{}/../../scripts/build-guest-examples.sh",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let out = Command::new("bash")
+            .arg(&script)
+            .output()
+            .expect("running build-guest-examples.sh");
+        assert!(
+            out.status.success(),
+            "example build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    });
+}
+
 fn bin() -> Command {
+    ensure_examples();
     Command::new(env!("CARGO_BIN_EXE_tee-runner"))
 }
 
@@ -14,39 +36,64 @@ fn example(name: &str) -> String {
     )
 }
 
-// Golden measurements: these pin the measurement construction AND the example
-// scripts. If either changes intentionally, update the goldens.
+// Capability goldens pin the *import-derived manifest* (formatting-invariant):
+// they catch a service pulling in capabilities it should not need (or losing
+// ones it does). The full artifact hex is deliberately NOT pinned here: guest
+// binaries embed panic-location strings, so artifact bytes shift with source
+// line numbers — pinning them would break on any comment reflow. Artifact
+// measurements are pinned at release time instead (Stage 7 manifests).
 #[test]
 fn measure_golden() {
-    let out = bin()
-        .args(["measure", &example("echo.lua")])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(
-        stdout,
-        "capabilities: log\n\
-         measurement: f3094126fe8da35f08d365ed2c99244cd3311bb42a780aacca94dc4afdf20e38\n"
-    );
+    let check = |file: &str, capabilities: &str| {
+        let path = example(file);
+        let out = bin().args(["measure", &path]).output().unwrap();
+        assert!(out.status.success(), "measure {file} failed");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(
+            stdout.lines().next().unwrap(),
+            format!("capabilities: {capabilities}")
+        );
 
+        // The CLI must report exactly what the library computes for the file.
+        let bytes = std::fs::read(&path).unwrap();
+        let (manifest, measurement) = runner_core::measure_module(&bytes).unwrap();
+        let caps: Vec<&str> = manifest.iter().map(|c| c.as_str()).collect();
+        let expected_caps = if capabilities == "(none)" {
+            String::new()
+        } else {
+            capabilities.to_string()
+        };
+        assert_eq!(caps.join(","), expected_caps);
+        assert_eq!(
+            stdout.lines().nth(1).unwrap(),
+            format!("measurement: {}", runner_core::to_hex(&measurement))
+        );
+    };
+
+    check("echo.wasm", "(none)");
+    check("counter.wasm", "log,state,clock");
+    check("hasher.wasm", "random,crypto");
+}
+
+/// Production builds compile Wasmtime *without* the `wat` feature: only
+/// binary wasm modules are ever accepted.
+#[test]
+fn measure_rejects_text_wasm() {
+    let path = std::env::temp_dir().join(format!("tee-runner-test-{}.wat", std::process::id()));
+    std::fs::write(&path, "(module)").unwrap();
     let out = bin()
-        .args(["measure", &example("counter.lua")])
+        .args(["measure", path.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(
-        stdout,
-        "capabilities: log,state,clock\n\
-         measurement: 5957f5d4403744d11d461d6f04a1a3068d3b4ddafbacf7f1d8d99085d46e21de\n"
-    );
+    assert!(!out.status.success(), "text input must be rejected");
+    assert!(String::from_utf8(out.stderr).unwrap().contains("error:"));
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
 fn run_echo_from_stdin() {
     let mut child = bin()
-        .args(["run", &example("echo.lua")])
+        .args(["run", &example("echo.wasm")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -65,14 +112,12 @@ fn run_echo_from_stdin() {
         serde_json::from_str::<serde_json::Value>(stdout.trim()).unwrap(),
         serde_json::json!({"echo": {"hello": ["world", 1]}})
     );
-    // logs go to stderr, stdout stays clean JSON
-    assert!(String::from_utf8(out.stderr).unwrap().contains("log[info]"));
 }
 
 #[test]
 fn run_script_error_exits_nonzero() {
     let mut child = bin()
-        .args(["run", &example("hasher.lua")])
+        .args(["run", &example("hasher.wasm")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,6 +132,30 @@ fn run_script_error_exits_nonzero() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8(out.stderr).unwrap().contains("error:"));
+}
+
+#[test]
+fn run_hasher_sha256() {
+    let mut child = bin()
+        .args(["run", &example("hasher.wasm")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"method":"sha256","data":"abc"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let resp: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        resp["digest"],
+        serde_json::json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    );
 }
 
 fn write_frame(stream: &mut TcpStream, payload: &[u8]) {
@@ -112,7 +181,7 @@ fn read_frame(stream: &mut TcpStream) -> Option<serde_json::Value> {
 #[test]
 fn serve_frames_keep_state_and_report_errors() {
     let mut child = bin()
-        .args(["serve", &example("counter.lua"), "--listen", "127.0.0.1:0"])
+        .args(["serve", &example("counter.wasm"), "--listen", "127.0.0.1:0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -138,7 +207,7 @@ fn serve_frames_keep_state_and_report_errors() {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
 
-    // Two frames on one connection: state persists between requests.
+    // Two frames on one connection: host-side state persists between requests.
     write_frame(&mut stream, br#"{"method":"incr","key":"a"}"#);
     let r1 = read_frame(&mut stream).unwrap();
     assert_eq!(r1["ok"], serde_json::json!(true));
@@ -148,11 +217,15 @@ fn serve_frames_keep_state_and_report_errors() {
     let r2 = read_frame(&mut stream).unwrap();
     assert_eq!(r2["response"]["value"], serde_json::json!(2));
 
-    // Script errors come back in-band on a live connection.
-    write_frame(&mut stream, br#"{"method":"nope"}"#);
+    write_frame(&mut stream, br#"{"method":"get","key":"a"}"#);
     let r3 = read_frame(&mut stream).unwrap();
-    assert_eq!(r3["ok"], serde_json::json!(false));
-    assert!(r3["error"].as_str().unwrap().contains("unknown method"));
+    assert_eq!(r3["response"]["value"], serde_json::json!(2));
+
+    // Guest errors come back in-band on a live connection.
+    write_frame(&mut stream, br#"{"method":"nope"}"#);
+    let r4 = read_frame(&mut stream).unwrap();
+    assert_eq!(r4["ok"], serde_json::json!(false));
+    assert!(r4["error"].as_str().unwrap().contains("unknown method"));
 
     // A malformed frame is a transport error: connection closes without reply.
     write_frame(&mut stream, b"not json");

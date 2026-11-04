@@ -9,11 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml pins the exact toolchain; rustup installs it on
-      # first cargo invocation (including rustfmt/clippy components).
+      # rust-toolchain.toml pins the exact toolchain (and the wasm target);
+      # rustup installs both on first cargo invocation.
+      - name: install wasm target
+        run: rustup target add wasm32-unknown-unknown
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: test guest services
+        run: cargo test -p tee-guest --features svc-counter

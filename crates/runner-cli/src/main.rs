@@ -1,6 +1,6 @@
-//! `tee-runner` — host CLI for running attestable Lua service scripts.
+//! `tee-runner` — host CLI for running attestable wasm service modules.
 //!
-//! * `measure` — print the capability manifest and script measurement
+//! * `measure` — print the capability manifest and module measurement
 //! * `run`     — handle a single JSON request, print the JSON response
 //! * `serve`   — handle length-prefixed JSON frames over TCP
 
@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use runner_core::{parse_manifest, script_measurement, to_hex, Limits, Runner};
+use runner_core::{measure_module, Limits, Runner};
 
 #[derive(Parser)]
 #[command(
     name = "tee-runner",
-    about = "Run attestable Lua service scripts in a sandbox"
+    about = "Run attestable wasm service modules in a sandbox"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,22 +27,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Print the capability manifest and measurement of a script.
+    /// Print the capability manifest and measurement of a module.
     Measure {
-        /// Path to the Lua script.
-        script: PathBuf,
+        /// Path to the wasm service module.
+        module: PathBuf,
     },
     /// Handle a single JSON request and print the JSON response.
     Run {
-        /// Path to the Lua script.
-        script: PathBuf,
+        /// Path to the wasm service module.
+        module: PathBuf,
         /// JSON request file (`-` for stdin).
         #[arg(short, long, default_value = "-")]
         request: PathBuf,
-        /// Per-request wall-clock budget in milliseconds.
+        /// Per-request wall-clock budget in milliseconds (epoch interruption).
         #[arg(long, default_value_t = 500)]
         cpu_ms: u64,
-        /// Lua memory limit in MiB.
+        /// Deterministic fuel (instruction) budget per request.
+        #[arg(long, default_value_t = 50_000_000)]
+        fuel: u64,
+        /// Guest linear-memory limit in MiB.
         #[arg(long, default_value_t = 32)]
         mem_mib: usize,
     },
@@ -52,15 +55,18 @@ enum Commands {
     /// Responses are wrapped as {"ok":true,"response":...} or
     /// {"ok":false,"error":...}.
     Serve {
-        /// Path to the Lua script.
-        script: PathBuf,
+        /// Path to the wasm service module.
+        module: PathBuf,
         /// Listen address.
         #[arg(long, default_value = "127.0.0.1:7000")]
         listen: String,
-        /// Per-request wall-clock budget in milliseconds.
+        /// Per-request wall-clock budget in milliseconds (epoch interruption).
         #[arg(long, default_value_t = 500)]
         cpu_ms: u64,
-        /// Lua memory limit in MiB.
+        /// Deterministic fuel (instruction) budget per request.
+        #[arg(long, default_value_t = 50_000_000)]
+        fuel: u64,
+        /// Guest linear-memory limit in MiB.
         #[arg(long, default_value_t = 32)]
         mem_mib: usize,
     },
@@ -69,19 +75,21 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Commands::Measure { script } => cmd_measure(&script),
+        Commands::Measure { module } => cmd_measure(&module),
         Commands::Run {
-            script,
+            module,
             request,
             cpu_ms,
+            fuel,
             mem_mib,
-        } => cmd_run(&script, &request, cpu_ms, mem_mib),
+        } => cmd_run(&module, &request, cpu_ms, fuel, mem_mib),
         Commands::Serve {
-            script,
+            module,
             listen,
             cpu_ms,
+            fuel,
             mem_mib,
-        } => cmd_serve(&script, &listen, cpu_ms, mem_mib),
+        } => cmd_serve(&module, &listen, cpu_ms, fuel, mem_mib),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -92,21 +100,22 @@ fn main() -> ExitCode {
     }
 }
 
-fn limits(cpu_ms: u64, mem_mib: usize) -> Limits {
+fn limits(cpu_ms: u64, fuel: u64, mem_mib: usize) -> Limits {
     Limits {
         max_cpu: Duration::from_millis(cpu_ms),
+        max_fuel: fuel,
         max_memory_bytes: mem_mib * 1024 * 1024,
         ..Limits::default()
     }
 }
 
-fn read_source(script: &Path) -> Result<String> {
-    std::fs::read_to_string(script).with_context(|| format!("reading script {}", script.display()))
+fn read_module(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).with_context(|| format!("reading module {}", path.display()))
 }
 
-fn cmd_measure(script: &Path) -> Result<()> {
-    let source = read_source(script)?;
-    let manifest = parse_manifest(&source)?;
+fn cmd_measure(module: &Path) -> Result<()> {
+    let bytes = read_module(module)?;
+    let (manifest, measurement) = measure_module(&bytes)?;
     let caps: Vec<&str> = manifest.iter().map(|c| c.as_str()).collect();
     let caps = if caps.is_empty() {
         "(none)".to_string()
@@ -114,16 +123,13 @@ fn cmd_measure(script: &Path) -> Result<()> {
         caps.join(",")
     };
     println!("capabilities: {caps}");
-    println!(
-        "measurement: {}",
-        to_hex(&script_measurement(&source, &manifest))
-    );
+    println!("measurement: {}", runner_core::to_hex(&measurement));
     Ok(())
 }
 
-fn cmd_run(script: &Path, request: &Path, cpu_ms: u64, mem_mib: usize) -> Result<()> {
-    let source = read_source(script)?;
-    let mut runner = Runner::new(&source, limits(cpu_ms, mem_mib))?;
+fn cmd_run(module: &Path, request: &Path, cpu_ms: u64, fuel: u64, mem_mib: usize) -> Result<()> {
+    let bytes = read_module(module)?;
+    let mut runner = Runner::new(&bytes, limits(cpu_ms, fuel, mem_mib))?;
 
     let raw = read_request(request)?;
     let request: serde_json::Value =
@@ -159,9 +165,9 @@ fn print_logs(runner: &mut Runner) {
     }
 }
 
-fn cmd_serve(script: &Path, listen: &str, cpu_ms: u64, mem_mib: usize) -> Result<()> {
-    let source = read_source(script)?;
-    let mut runner = Runner::new(&source, limits(cpu_ms, mem_mib))?;
-    eprintln!("script measurement: {}", runner.measurement_hex());
+fn cmd_serve(module: &Path, listen: &str, cpu_ms: u64, fuel: u64, mem_mib: usize) -> Result<()> {
+    let bytes = read_module(module)?;
+    let mut runner = Runner::new(&bytes, limits(cpu_ms, fuel, mem_mib))?;
+    eprintln!("module measurement: {}", runner.measurement_hex());
     server::serve(&mut runner, listen)
 }

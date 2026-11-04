@@ -3,23 +3,24 @@ use thiserror::Error;
 /// Errors produced by the runner core.
 #[derive(Debug, Error)]
 pub enum RunnerError {
-    /// The `@capability` manifest is invalid.
+    /// The module's import section references unknown capabilities or has the
+    /// wrong host signatures.
     #[error("invalid capability manifest: {0}")]
     InvalidManifest(String),
 
-    /// The script failed to compile or run at load time.
-    #[error("script failed to load: {0}")]
+    /// A required export (`memory`, `alloc`, `handle`) is missing or mistyped.
+    #[error("invalid module: missing export `{0}`")]
+    MissingExport(String),
+
+    /// The module is not valid wasm, or failed to compile/validate.
+    #[error("module failed to load: {0}")]
     ScriptLoad(String),
 
-    /// The script does not define a global `handle` function.
-    #[error("script does not define a global `handle` function")]
-    NoHandler,
-
-    /// The script raised an error while handling a request.
+    /// The guest reported a failure envelope (or trapped in user logic).
     #[error("script error: {0}")]
     Script(String),
 
-    /// A resource limit tripped while running the script.
+    /// A resource limit tripped while running the module.
     #[error("resource limit exceeded: {0}")]
     LimitExceeded(#[from] Limit),
 
@@ -27,22 +28,25 @@ pub enum RunnerError {
     #[error("request too large: {size} bytes (limit {max} bytes)")]
     RequestTooLarge { size: usize, max: usize },
 
-    /// The serialized response exceeds [`crate::Limits::max_response_bytes`].
+    /// The guest's output exceeds [`crate::Limits::max_response_bytes`].
     #[error("response too large: {size} bytes (limit {max} bytes)")]
     ResponseTooLarge { size: usize, max: usize },
 
-    /// An internal error surfaced from the Lua bridge.
-    #[error("lua error: {0}")]
-    Lua(#[from] mlua::Error),
+    /// An internal failure (engine setup, memory plumbing).
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
-/// Resource limits that can trip while the script runs.
+/// Resource limits that can trip while the guest runs.
 #[derive(Debug, Clone, Error)]
 pub enum Limit {
-    /// Wall-clock budget for one load/request was exhausted.
+    /// Wall-clock budget for one request was exhausted (epoch interruption).
     #[error("CPU time limit exceeded (limit {0} ms)")]
     Cpu(u64),
-    /// Lua memory usage exceeded the configured cap.
-    #[error("memory limit exceeded (used {used} bytes, limit {max} bytes)")]
-    Memory { used: usize, max: usize },
+    /// Deterministic fuel (instruction) budget was exhausted.
+    #[error("fuel limit exceeded (limit {0} instructions)")]
+    Fuel(u64),
+    /// The guest's linear memory exceeded the configured cap.
+    #[error("memory limit exceeded (limit {max} bytes)")]
+    Memory { max: usize },
 }

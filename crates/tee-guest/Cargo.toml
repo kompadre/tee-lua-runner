@@ -1,0 +1,26 @@
+[package]
+name = "tee-guest"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# cdylib produces the .wasm artifact; rlib allows native builds/tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# Native mock backend (unit tests / workspace builds); unused on wasm32 where
+# calls go through the real wasm imports instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []
+svc-echo = []
+svc-counter = []
+svc-hasher = []
